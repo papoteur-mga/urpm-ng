@@ -457,17 +457,129 @@ def cmd_show(args, db: PackageDatabase) -> int:
 def cmd_media_list(args, db: PackageDatabase) -> int:
     """Handle media list command."""
     media_list = db.list_media()
-    
+
     if not media_list:
         print("No media configured")
         return 0
-    
+
     for m in media_list:
         status = "[x]" if m['enabled'] else "[ ]"
         update_tag = " [update]" if m['update_media'] else ""
         print(f"  {status} {m['name']:20} {m['url'] or m['mirrorlist'] or ''}{update_tag}")
-    
+
     return 0
+
+
+def cmd_media_add(args, db: PackageDatabase) -> int:
+    """Handle media add command."""
+    name = args.name
+    url = args.url
+
+    # Check if already exists
+    if db.get_media(name):
+        print(f"Media '{name}' already exists")
+        return 1
+
+    media_id = db.add_media(
+        name=name,
+        url=url,
+        enabled=not args.disabled,
+        update=args.update
+    )
+
+    print(f"Added media '{name}' (id={media_id})")
+    return 0
+
+
+def cmd_media_remove(args, db: PackageDatabase) -> int:
+    """Handle media remove command."""
+    name = args.name
+
+    if not db.get_media(name):
+        print(f"Media '{name}' not found")
+        return 1
+
+    db.remove_media(name)
+    print(f"Removed media '{name}'")
+    return 0
+
+
+def cmd_media_enable(args, db: PackageDatabase) -> int:
+    """Handle media enable command."""
+    name = args.name
+
+    if not db.get_media(name):
+        print(f"Media '{name}' not found")
+        return 1
+
+    db.enable_media(name, enabled=True)
+    print(f"Enabled media '{name}'")
+    return 0
+
+
+def cmd_media_disable(args, db: PackageDatabase) -> int:
+    """Handle media disable command."""
+    name = args.name
+
+    if not db.get_media(name):
+        print(f"Media '{name}' not found")
+        return 1
+
+    db.enable_media(name, enabled=False)
+    print(f"Disabled media '{name}'")
+    return 0
+
+
+def cmd_media_update(args, db: PackageDatabase) -> int:
+    """Handle media update command."""
+    from ..core.sync import sync_media, sync_all_media
+
+    def progress(media_name, stage, current, total):
+        if total > 0:
+            print(f"\r  {media_name}: {stage} ({current}/{total})", end='', flush=True)
+        else:
+            print(f"\r  {media_name}: {stage}                    ", end='', flush=True)
+
+    if args.name:
+        # Update specific media
+        media = db.get_media(args.name)
+        if not media:
+            print(f"Media '{args.name}' not found")
+            return 1
+
+        print(f"Updating {args.name}...")
+
+        def single_progress(stage, current, total):
+            progress(args.name, stage, current, total)
+
+        result = sync_media(db, args.name, single_progress, force=True)
+        print()  # newline after progress
+
+        if result.success:
+            print(f"  {result.packages_count} packages")
+            return 0
+        else:
+            print(f"  Error: {result.error}")
+            return 1
+    else:
+        # Update all media
+        print("Updating all media...")
+        results = sync_all_media(db, progress, force=True)
+        print()  # newline after progress
+
+        total_packages = 0
+        errors = 0
+
+        for name, result in results:
+            if result.success:
+                print(f"  {name}: {result.packages_count} packages")
+                total_packages += result.packages_count
+            else:
+                print(f"  {name}: ERROR - {result.error}")
+                errors += 1
+
+        print(f"\nTotal: {total_packages} packages from {len(results)} media")
+        return 1 if errors else 0
 
 
 def cmd_cache_info(args, db: PackageDatabase) -> int:
@@ -518,6 +630,16 @@ def main(argv=None) -> int:
         elif args.command in ('media', 'm'):
             if args.media_command in ('list', 'l', 'ls', None):
                 return cmd_media_list(args, db)
+            elif args.media_command in ('add', 'a'):
+                return cmd_media_add(args, db)
+            elif args.media_command in ('remove', 'r'):
+                return cmd_media_remove(args, db)
+            elif args.media_command in ('enable', 'e'):
+                return cmd_media_enable(args, db)
+            elif args.media_command in ('disable', 'd'):
+                return cmd_media_disable(args, db)
+            elif args.media_command in ('update', 'u'):
+                return cmd_media_update(args, db)
             else:
                 return cmd_not_implemented(args, db)
         
