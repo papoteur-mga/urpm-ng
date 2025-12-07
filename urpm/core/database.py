@@ -11,8 +11,16 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Iterator
 
+# Schema version - increment when schema changes
+SCHEMA_VERSION = 2
+
 # Extended schema with media, config, history tables
 SCHEMA = """
+-- Schema version tracking
+CREATE TABLE IF NOT EXISTS schema_info (
+    version INTEGER PRIMARY KEY
+);
+
 -- Packages table
 CREATE TABLE IF NOT EXISTS packages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,8 +167,30 @@ class PackageDatabase:
         self._init_schema()
     
     def _init_schema(self):
-        """Initialize database schema."""
+        """Initialize database schema, recreating if version mismatch."""
+        # Check existing schema version
+        try:
+            cursor = self.conn.execute("SELECT version FROM schema_info LIMIT 1")
+            row = cursor.fetchone()
+            current_version = row[0] if row else 0
+        except sqlite3.OperationalError:
+            current_version = 0
+
+        if current_version != SCHEMA_VERSION:
+            # Schema mismatch - recreate database
+            self.conn.close()
+            self.db_path.unlink(missing_ok=True)
+            self.conn = sqlite3.connect(str(self.db_path))
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+
         self.conn.executescript(SCHEMA)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_info (version) VALUES (?)",
+            (SCHEMA_VERSION,)
+        )
         self.conn.commit()
     
     def close(self):
