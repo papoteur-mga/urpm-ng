@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Iterator
 
 # Schema version - increment when schema changes
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Extended schema with media, config, history tables
 SCHEMA = """
@@ -152,9 +152,13 @@ CREATE INDEX IF NOT EXISTS idx_pkg_name_lower ON packages(name_lower);
 CREATE INDEX IF NOT EXISTS idx_pkg_nevra ON packages(nevra);
 CREATE INDEX IF NOT EXISTS idx_pkg_media ON packages(media_id);
 CREATE INDEX IF NOT EXISTS idx_provides_cap ON provides(capability);
+CREATE INDEX IF NOT EXISTS idx_provides_pkg ON provides(pkg_id);
 CREATE INDEX IF NOT EXISTS idx_requires_cap ON requires(capability);
+CREATE INDEX IF NOT EXISTS idx_requires_pkg ON requires(pkg_id);
 CREATE INDEX IF NOT EXISTS idx_conflicts_cap ON conflicts(capability);
+CREATE INDEX IF NOT EXISTS idx_conflicts_pkg ON conflicts(pkg_id);
 CREATE INDEX IF NOT EXISTS idx_obsoletes_cap ON obsoletes(capability);
+CREATE INDEX IF NOT EXISTS idx_obsoletes_pkg ON obsoletes(pkg_id);
 """
 
 
@@ -396,7 +400,29 @@ class PackageDatabase:
             raise e
     
     def clear_media_packages(self, media_id: int):
-        """Remove all packages from a media."""
+        """Remove all packages from a media.
+
+        Deletes from child tables first to avoid slow CASCADE.
+        """
+        # Delete dependencies first (faster than CASCADE)
+        self.conn.execute("""
+            DELETE FROM requires WHERE pkg_id IN
+            (SELECT id FROM packages WHERE media_id = ?)
+        """, (media_id,))
+        self.conn.execute("""
+            DELETE FROM provides WHERE pkg_id IN
+            (SELECT id FROM packages WHERE media_id = ?)
+        """, (media_id,))
+        self.conn.execute("""
+            DELETE FROM conflicts WHERE pkg_id IN
+            (SELECT id FROM packages WHERE media_id = ?)
+        """, (media_id,))
+        self.conn.execute("""
+            DELETE FROM obsoletes WHERE pkg_id IN
+            (SELECT id FROM packages WHERE media_id = ?)
+        """, (media_id,))
+
+        # Now delete packages
         self.conn.execute("DELETE FROM packages WHERE media_id = ?", (media_id,))
         self.conn.commit()
     
