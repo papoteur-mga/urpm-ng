@@ -48,13 +48,15 @@ class Installer:
 
     def install(self, rpm_paths: List[Path],
                 progress_callback: Callable[[str, int, int], None] = None,
-                test: bool = False) -> InstallResult:
+                test: bool = False,
+                verify_signatures: bool = True) -> InstallResult:
         """Install RPM packages.
 
         Args:
             rpm_paths: List of paths to RPM files
             progress_callback: Optional callback(name, current, total)
             test: If True, only check, don't install
+            verify_signatures: If True, verify GPG signatures (default: True)
 
         Returns:
             InstallResult with status
@@ -64,13 +66,18 @@ class Installer:
 
         ts = rpm.TransactionSet(self.root)
 
-        # Don't verify signatures for now (like --nosignature)
-        ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)
+        if verify_signatures:
+            # Verify all signatures and digests
+            ts.setVSFlags(0)
+        else:
+            # Skip signature verification (--nosignature)
+            ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)
 
         errors = []
         headers = []
 
         # Add packages to transaction
+        signature_errors = []
         for path in rpm_paths:
             try:
                 fd = os.open(str(path), os.O_RDONLY)
@@ -82,9 +89,16 @@ class Installer:
                 finally:
                     os.close(fd)
             except rpm.error as e:
-                errors.append(f"{path.name}: {e}")
+                err_str = str(e).lower()
+                if 'signature' in err_str or 'key' in err_str or 'gpg' in err_str:
+                    signature_errors.append(path.name)
+                    errors.append(f"{path.name}: signature verification failed - {e}")
+                else:
+                    errors.append(f"{path.name}: {e}")
 
         if errors:
+            if signature_errors and verify_signatures:
+                errors.append("Use --nosignature to skip signature verification (not recommended)")
             return InstallResult(success=False, errors=errors)
 
         # Check dependencies

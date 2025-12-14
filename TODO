@@ -8,14 +8,22 @@
   - Vérifier que le diff requires fonctionne correctement
   - Tester `--noerase-orphans` pour garder les orphelins
 
+- [ ] Vérification des signatures GPG
+  - Tester installation d'un paquet signé (doit fonctionner)
+  - Tester installation avec clé manquante (doit échouer)
+  - Tester `--nosignature` pour bypass
+  - Tester `urpm key import <url>` avec URL HTTPS
 
-## Sécurité - Clés GPG (P1)
 
-Gestion des clés de signature des paquets :
-  - Vérification des signatures lors de l'installation
-  - Refuser l'installation si signature invalide/absente (sauf --force)
-  - Import des clés (urpmi --import-all-keys ou équivalent)
-  - Gestion du trousseau (liste, ajout, suppression)
+## Sécurité - Clés GPG (P1) - FAIT
+
+Implémenté :
+  - [x] Vérification des signatures activée par défaut
+  - [x] Refus si signature invalide avec message clair
+  - [x] Option `--nosignature` pour bypass (install/update/upgrade)
+  - [x] `urpm key list` - lister les clés installées
+  - [x] `urpm key import <file|url>` - importer une clé (fichier local ou HTTPS)
+  - [x] `urpm key remove <keyid>` - supprimer une clé
 
 
 ## autoremove (P1)
@@ -223,3 +231,5 @@ Tous les messages de urpm doivent être traduisibles :
 - [x] Blacklist/redlist avec protection à deux niveaux
 - [x] Commandes config blacklist/redlist/kernel-keep
 - [x] Détection et suppression des orphelins lors de l'upgrade (--noerase-orphans pour garder)
+- [x] Vérification GPG des signatures par défaut (--nosignature pour bypass)
+- [x] Gestion des clés GPG (urpm key list/import/remove)
