@@ -114,6 +114,11 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Install for all matching families (e.g., both php8.4 and php8.5)'
     )
+    install_parser.add_argument(
+        '--nosignature',
+        action='store_true',
+        help='Skip GPG signature verification (not recommended)'
+    )
 
     # =========================================================================
     # erase / e (like rpm -e, urpme)
@@ -322,6 +327,11 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Dry run - show what would be done'
     )
+    update_parser.add_argument(
+        '--nosignature',
+        action='store_true',
+        help='Skip GPG signature verification (not recommended)'
+    )
 
     # =========================================================================
     # upgrade (alias for update --all)
@@ -344,6 +354,11 @@ def create_parser() -> argparse.ArgumentParser:
         '--test',
         action='store_true',
         help='Dry run - show what would be done'
+    )
+    upgrade_parser.add_argument(
+        '--nosignature',
+        action='store_true',
+        help='Skip GPG signature verification (not recommended)'
     )
     
     # =========================================================================
@@ -590,6 +605,23 @@ def create_parser() -> argparse.ArgumentParser:
         help='Number of old kernels to keep (in addition to running)'
     )
     kernel_keep_parser.add_argument('count', nargs='?', type=int, help='Number of kernels to keep (show current if omitted)')
+
+    # =========================================================================
+    # key - GPG key management
+    # =========================================================================
+    key_parser = subparsers.add_parser(
+        'key', aliases=['k'],
+        help='Manage GPG keys for package verification'
+    )
+    key_subparsers = key_parser.add_subparsers(dest='key_cmd', metavar='COMMAND')
+
+    key_subparsers.add_parser('list', aliases=['ls', 'l'], help='List installed GPG keys')
+
+    key_import = key_subparsers.add_parser('import', aliases=['i', 'add'], help='Import GPG key')
+    key_import.add_argument('keyfile', help='Path to key file or HTTPS URL')
+
+    key_remove = key_subparsers.add_parser('remove', aliases=['rm', 'del'], help='Remove GPG key')
+    key_remove.add_argument('keyid', help='Key ID to remove (e.g., 80420f66)')
 
     return parser
 
@@ -1396,7 +1428,8 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
 
     try:
-        install_result = installer.install(rpm_paths, install_progress)
+        verify_sigs = not getattr(args, 'nosignature', False)
+        install_result = installer.install(rpm_paths, install_progress, verify_signatures=verify_sigs)
         print()  # newline after progress
 
         if not install_result.success:
@@ -1782,7 +1815,8 @@ def cmd_update(args, db: PackageDatabase) -> int:
             def install_progress(name, current, total):
                 print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
 
-            install_result = installer.install(rpm_paths, install_progress)
+            verify_sigs = not getattr(args, 'nosignature', False)
+            install_result = installer.install(rpm_paths, install_progress, verify_signatures=verify_sigs)
             print()
 
             if not install_result.success:
@@ -2728,6 +2762,162 @@ def cmd_config(args) -> int:
 
     else:
         print(f"Usage: urpm config {list_name} <list|add|remove> [package]")
+        return 1
+
+
+def cmd_key(args) -> int:
+    """Handle key command - manage GPG keys for package verification."""
+    import os
+    import rpm
+    import subprocess
+    from ..core.install import check_root
+
+    if not hasattr(args, 'key_cmd') or not args.key_cmd:
+        print("Usage: urpm key <list|import|remove> ...")
+        print("\nCommands:")
+        print("  list            List installed GPG keys")
+        print("  import <file>   Import GPG key from file or HTTPS URL")
+        print("  remove <keyid>  Remove GPG key")
+        return 1
+
+    # List keys
+    if args.key_cmd in ('list', 'ls', 'l'):
+        ts = rpm.TransactionSet()
+        keys = []
+
+        for hdr in ts.dbMatch('name', 'gpg-pubkey'):
+            version = hdr[rpm.RPMTAG_VERSION]
+            release = hdr[rpm.RPMTAG_RELEASE]
+            summary = hdr[rpm.RPMTAG_SUMMARY]
+            keys.append((version, release, summary))
+
+        if not keys:
+            print("No GPG keys installed")
+            return 0
+
+        print(f"\nInstalled GPG keys ({len(keys)}):\n")
+        for version, release, summary in sorted(keys):
+            print(f"  {version}-{release}")
+            print(f"    {summary}")
+        print()
+        return 0
+
+    # Import key
+    elif args.key_cmd in ('import', 'i', 'add'):
+        if not check_root():
+            print("Error: importing keys requires root privileges")
+            return 1
+
+        if not hasattr(args, 'keyfile') or not args.keyfile:
+            print("Usage: urpm key import <keyfile|url>")
+            return 1
+
+        key_source = args.keyfile
+
+        # Check if it's an HTTPS URL
+        if key_source.startswith('https://'):
+            import tempfile
+            import urllib.request
+            import urllib.error
+
+            print(f"Downloading key from {key_source}...")
+            try:
+                with urllib.request.urlopen(key_source, timeout=30) as response:
+                    key_data = response.read()
+
+                # Write to temporary file and import
+                with tempfile.NamedTemporaryFile(mode='wb', suffix='.gpg', delete=False) as tmp:
+                    tmp.write(key_data)
+                    tmp_path = tmp.name
+
+                try:
+                    result = subprocess.run(
+                        ['rpm', '--import', tmp_path],
+                        capture_output=True, text=True
+                    )
+                    if result.returncode == 0:
+                        print(f"Key imported from {key_source}")
+                        return 0
+                    else:
+                        print(f"Failed to import key: {result.stderr}")
+                        return 1
+                finally:
+                    os.unlink(tmp_path)
+
+            except urllib.error.URLError as e:
+                print(f"Error: failed to download key: {e.reason}")
+                return 1
+            except Exception as e:
+                print(f"Error: {e}")
+                return 1
+
+        elif key_source.startswith('http://'):
+            print("Error: HTTP URLs are not allowed for security reasons. Use HTTPS.")
+            return 1
+
+        else:
+            # Import from local file
+            if not os.path.exists(key_source):
+                print(f"Error: file not found: {key_source}")
+                return 1
+
+            result = subprocess.run(
+                ['rpm', '--import', key_source],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                print(f"Key imported from {key_source}")
+                return 0
+            else:
+                print(f"Failed to import key: {result.stderr}")
+                return 1
+
+    # Remove key
+    elif args.key_cmd in ('remove', 'rm', 'del'):
+        if not check_root():
+            print("Error: removing keys requires root privileges")
+            return 1
+
+        keyid = args.keyid.lower()
+
+        # Find the key
+        ts = rpm.TransactionSet()
+        found = None
+        for hdr in ts.dbMatch('name', 'gpg-pubkey'):
+            version = hdr[rpm.RPMTAG_VERSION]
+            if version.lower() == keyid:
+                found = f"gpg-pubkey-{version}-{hdr[rpm.RPMTAG_RELEASE]}"
+                break
+
+        if not found:
+            print(f"Key not found: {keyid}")
+            print("Use 'urpm key list' to see installed keys")
+            return 1
+
+        # Confirm
+        print(f"Removing key: {found}")
+        try:
+            response = input("Are you sure? [y/N] ")
+            if response.lower() not in ('y', 'yes', 'o', 'oui'):
+                print("Aborted")
+                return 0
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted")
+            return 0
+
+        result = subprocess.run(
+            ['rpm', '-e', found],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print("Key removed")
+            return 0
+        else:
+            print(f"Failed to remove key: {result.stderr}")
+            return 1
+
+    else:
+        print(f"Unknown key command: {args.key_cmd}")
         return 1
 
 
@@ -4032,6 +4222,9 @@ def main(argv=None) -> int:
 
         elif args.command in ('config', 'cfg'):
             return cmd_config(args)
+
+        elif args.command in ('key', 'k'):
+            return cmd_key(args)
 
         else:
             return cmd_not_implemented(args, db)
