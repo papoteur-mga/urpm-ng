@@ -1339,6 +1339,20 @@ def cmd_install(args, db: PackageDatabase) -> int:
     explicit_names = set(_extract_pkg_name(p).lower() for p in args.packages)
     explicit_names.update(p.lower() for p in resolved_packages)
 
+    # Also include packages that provide what the user requested
+    # (e.g., user asked for 'nvim', resolver found 'neovim' which provides 'nvim')
+    requested_names = set(_extract_pkg_name(p).lower() for p in args.packages)
+    for action in result.actions:
+        # Check if this package provides any of the requested names
+        pkg_info = db.get_package(action.name)
+        if pkg_info and pkg_info.get('provides'):
+            for prov in pkg_info['provides']:
+                # Extract provide name (remove version constraints)
+                prov_name = prov.split('[')[0].split('=')[0].split('<')[0].split('>')[0].strip().lower()
+                if prov_name in requested_names:
+                    explicit_names.add(action.name.lower())
+                    break
+
     # Show transaction summary
     from . import colors
     print(f"\n{colors.bold(f'{len(result.actions)} packages to install')} ({format_size(result.install_size)})\n")
@@ -1554,12 +1568,31 @@ def cmd_erase(args, db: PackageDatabase) -> int:
         pkg_name = _extract_pkg_name(pkg).lower()
         explicit_names.add(pkg_name)
 
+    # Also include packages that provide what the user requested
+    for action in result.actions:
+        pkg_info = db.get_package(action.name)
+        if pkg_info and pkg_info.get('provides'):
+            for prov in pkg_info['provides']:
+                prov_name = prov.split('[')[0].split('=')[0].split('<')[0].split('>')[0].strip().lower()
+                if prov_name in explicit_names:
+                    explicit_names.add(action.name.lower())
+                    break
+
     explicit = [a for a in result.actions if a.name.lower() in explicit_names]
     deps = [a for a in result.actions if a.name.lower() not in explicit_names]
 
-    # With SOLVER_CLEANDEPS, libsolv includes orphaned deps in the transaction
+    # Find orphaned dependencies that will be left behind
+    erase_names = [a.name for a in result.actions]
+    orphans = resolver.find_erase_orphans(erase_names)
+
     all_actions = result.actions
     total_size = result.remove_size
+
+    # Add orphans to the removal
+    if orphans:
+        all_actions = list(result.actions) + orphans
+        for o in orphans:
+            total_size += o.size
 
     # Show what will be erased
     print(f"\n{colors.bold(f'The following {len(all_actions)} package(s) will be erased:')}")
@@ -1570,8 +1603,13 @@ def cmd_erase(args, db: PackageDatabase) -> int:
             print(f"    {action.nevra}")
 
     if deps:
-        print(f"\n  {colors.warning(f'Dependencies ({len(deps)}):')}")
+        print(f"\n  {colors.warning(f'Reverse dependencies ({len(deps)}):')}")
         for action in deps:
+            print(f"    {action.nevra}")
+
+    if orphans:
+        print(f"\n  {colors.warning(f'Orphaned dependencies ({len(orphans)}):')}")
+        for action in orphans:
             print(f"    {action.nevra}")
 
     if total_size > 0:

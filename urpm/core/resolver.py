@@ -657,6 +657,11 @@ class Resolver:
                                        solv.Selection.SELECTION_INSTALLED_ONLY)
 
             if sel.isempty():
+                # Try provides match (e.g., "nvim" -> neovim)
+                sel = self.pool.select(name, solv.Selection.SELECTION_PROVIDES |
+                                       solv.Selection.SELECTION_INSTALLED_ONLY)
+
+            if sel.isempty():
                 not_found.append(name)
             else:
                 # SOLVER_CLEANDEPS tells solver to also remove deps that become unneeded
@@ -1297,6 +1302,168 @@ class Resolver:
                 orphan_candidates.add(name)
 
         # Step 5: Build PackageAction list for orphans
+        orphans = []
+        for hdr in ts.dbMatch():
+            name = hdr[rpm.RPMTAG_NAME]
+            if name not in orphan_candidates:
+                continue
+
+            epoch = hdr[rpm.RPMTAG_EPOCH] or 0
+            version = hdr[rpm.RPMTAG_VERSION]
+            release = hdr[rpm.RPMTAG_RELEASE]
+            arch = hdr[rpm.RPMTAG_ARCH] or 'noarch'
+            size = hdr[rpm.RPMTAG_SIZE] or 0
+
+            if epoch and epoch > 0:
+                evr = f"{epoch}:{version}-{release}"
+            else:
+                evr = f"{version}-{release}"
+
+            orphans.append(PackageAction(
+                action=TransactionType.REMOVE,
+                name=name,
+                evr=evr,
+                arch=arch,
+                nevra=f"{name}-{evr}.{arch}",
+                size=size,
+            ))
+
+        return orphans
+
+    def find_erase_orphans(self, erase_names: List[str]) -> List[PackageAction]:
+        """Find packages that will become orphans after erasing packages.
+
+        Only considers packages that are in the dependency chain of the packages
+        being erased, not all dependency packages on the system.
+
+        Args:
+            erase_names: List of package names being erased
+
+        Returns:
+            List of PackageAction for packages that will become orphans
+        """
+        if not HAS_RPM:
+            return []
+
+        # Get packages installed as dependencies (not explicitly requested)
+        unrequested = self._get_unrequested_packages()
+        if not unrequested:
+            return []
+
+        ts = rpm.TransactionSet(self.root)
+        erase_set = set(n.lower() for n in erase_names)
+
+        # Build provides, requires maps and capability->provider index
+        pkg_provides = {}  # name -> set of capability names
+        pkg_requires = {}  # name -> set of capability names
+        cap_to_pkg = {}    # capability -> set of package names providing it
+        name_to_original = {}  # lowercase name -> original case name
+
+        for hdr in ts.dbMatch():
+            name = hdr[rpm.RPMTAG_NAME]
+            if name == 'gpg-pubkey':
+                continue
+
+            name_to_original[name.lower()] = name
+
+            provides = set()
+            for prov in (hdr[rpm.RPMTAG_PROVIDENAME] or []):
+                cap = self._extract_cap_name(prov)
+                provides.add(cap)
+                if cap not in cap_to_pkg:
+                    cap_to_pkg[cap] = set()
+                cap_to_pkg[cap].add(name)
+            pkg_provides[name] = provides
+
+            requires = set()
+            for req in (hdr[rpm.RPMTAG_REQUIRENAME] or []):
+                if not req.startswith('rpmlib('):
+                    requires.add(self._extract_cap_name(req))
+            pkg_requires[name] = requires
+
+        # Find what the erased packages require (their direct dependencies)
+        erased_requires = set()
+        for name in erase_names:
+            # Handle case sensitivity
+            orig_name = name_to_original.get(name.lower(), name)
+            erased_requires.update(pkg_requires.get(orig_name, set()))
+
+        # Find packages that satisfy those requirements and are marked as dependencies
+        # These are the ONLY potential orphan candidates (not all deps on the system)
+        potential_orphans = set()
+        for cap in erased_requires:
+            for provider in cap_to_pkg.get(cap, set()):
+                if provider.lower() in unrequested and provider.lower() not in erase_set:
+                    potential_orphans.add(provider)
+
+        if not potential_orphans:
+            return []
+
+        # Check which of these are still required by remaining packages
+        remaining_pkgs = set(pkg_provides.keys())
+        for name in erase_names:
+            orig_name = name_to_original.get(name.lower(), name)
+            remaining_pkgs.discard(orig_name)
+
+        orphan_candidates = set()
+        for name in potential_orphans:
+            my_provides = pkg_provides.get(name, set())
+            is_required = False
+
+            for other_name in remaining_pkgs:
+                if other_name == name:
+                    continue
+                if other_name.lower() in erase_set:
+                    continue
+
+                other_requires = pkg_requires.get(other_name, set())
+                if my_provides & other_requires:
+                    is_required = True
+                    break
+
+            if not is_required:
+                orphan_candidates.add(name)
+
+        # Iteratively find orphans of orphans (within the dependency chain only)
+        changed = True
+        while changed:
+            changed = False
+            # Find what the current orphans require
+            orphan_requires = set()
+            for name in orphan_candidates:
+                orphan_requires.update(pkg_requires.get(name, set()))
+
+            # Find packages providing those that are also dependencies
+            for cap in orphan_requires:
+                for provider in cap_to_pkg.get(cap, set()):
+                    if provider in orphan_candidates:
+                        continue
+                    if provider.lower() in erase_set:
+                        continue
+                    if provider.lower() not in unrequested:
+                        continue  # Explicit package, don't remove
+
+                    my_provides = pkg_provides.get(provider, set())
+                    is_required = False
+
+                    for other_name in remaining_pkgs:
+                        if other_name == provider:
+                            continue
+                        if other_name.lower() in erase_set:
+                            continue
+                        if other_name in orphan_candidates:
+                            continue
+
+                        other_requires = pkg_requires.get(other_name, set())
+                        if my_provides & other_requires:
+                            is_required = True
+                            break
+
+                    if not is_required:
+                        orphan_candidates.add(provider)
+                        changed = True
+
+        # Build PackageAction list for orphans
         orphans = []
         for hdr in ts.dbMatch():
             name = hdr[rpm.RPMTAG_NAME]
