@@ -24,24 +24,28 @@ SYNTHESIS_PATH = "media_info/synthesis.hdlist.cz"
 HDLIST_PATH = "media_info/hdlist.cz"
 MD5SUM_PATH = "media_info/MD5SUM"
 
-# Local cache directory (mirrors structure)
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "urpm"
+
+# Re-export from config for backwards compatibility
+from .config import get_base_dir, get_hostname_from_url, get_media_dir
 
 
-def get_hostname_from_url(url: str) -> str:
-    """Extract hostname from a URL for cache organization."""
-    from urllib.parse import urlparse
-    parsed = urlparse(url)
-    return parsed.netloc or "local"
-
-
-def get_media_cache_dir(media_name: str, media_url: str) -> Path:
+def get_media_cache_dir(media_name: str, media_url: str, base_dir: Path = None) -> Path:
     """Get cache directory for a media.
 
-    Structure: ~/.cache/urpm/medias/<hostname>/<media_name>/
+    Structure: <base_dir>/medias/<hostname>/<media_name>/
+
+    Args:
+        media_name: Name of the media
+        media_url: URL of the media (used to extract hostname)
+        base_dir: Base directory (default: auto-detect based on PROD/DEV mode)
+
+    Returns:
+        Path to media cache directory
     """
+    if base_dir is None:
+        base_dir = get_base_dir()
     hostname = get_hostname_from_url(media_url)
-    return DEFAULT_CACHE_DIR / "medias" / hostname / media_name
+    return get_media_dir(base_dir, hostname, media_name)
 
 
 @dataclass

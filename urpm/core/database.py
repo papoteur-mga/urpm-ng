@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Iterator
 
 # Schema version - increment when schema changes
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Extended schema with media, config, history tables
 SCHEMA = """
@@ -88,6 +88,35 @@ CREATE TABLE IF NOT EXISTS obsoletes (
     capability TEXT NOT NULL,
     operator TEXT,
     version TEXT,
+    FOREIGN KEY (pkg_id) REFERENCES packages(id) ON DELETE CASCADE
+);
+
+-- Weak dependencies (RPM 4.12+)
+CREATE TABLE IF NOT EXISTS recommends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pkg_id INTEGER NOT NULL,
+    capability TEXT NOT NULL,
+    FOREIGN KEY (pkg_id) REFERENCES packages(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS suggests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pkg_id INTEGER NOT NULL,
+    capability TEXT NOT NULL,
+    FOREIGN KEY (pkg_id) REFERENCES packages(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS supplements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pkg_id INTEGER NOT NULL,
+    capability TEXT NOT NULL,
+    FOREIGN KEY (pkg_id) REFERENCES packages(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS enhances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pkg_id INTEGER NOT NULL,
+    capability TEXT NOT NULL,
     FOREIGN KEY (pkg_id) REFERENCES packages(id) ON DELETE CASCADE
 );
 
@@ -174,16 +203,19 @@ CREATE INDEX IF NOT EXISTS idx_obsoletes_pkg ON obsoletes(pkg_id);
 
 class PackageDatabase:
     """SQLite database for package metadata cache."""
-    
-    DEFAULT_PATH = Path.home() / ".cache" / "urpm" / "packages.db"
-    
+
     def __init__(self, db_path: Optional[Path] = None):
         """Initialize database connection.
-        
+
         Args:
-            db_path: Path to SQLite database file (default: ~/.cache/urpm/packages.db)
+            db_path: Path to SQLite database file.
+                     If None, uses PROD path (/var/lib/urpm/) when root,
+                     DEV path (~/.cache/urpm/) otherwise.
         """
-        self.db_path = Path(db_path) if db_path else self.DEFAULT_PATH
+        if db_path is None:
+            from .config import get_db_path
+            db_path = get_db_path()
+        self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
         self.conn = sqlite3.connect(str(self.db_path))
@@ -361,6 +393,10 @@ class PackageDatabase:
             provides_rows = []
             conflicts_rows = []
             obsoletes_rows = []
+            recommends_rows = []
+            suggests_rows = []
+            supplements_rows = []
+            enhances_rows = []
 
             for pkg in all_packages:
                 pkg_id = nevra_to_id.get(pkg['nevra'])
@@ -375,6 +411,15 @@ class PackageDatabase:
                     conflicts_rows.append((pkg_id, cap))
                 for cap in pkg.get('obsoletes', []):
                     obsoletes_rows.append((pkg_id, cap))
+                # Weak dependencies
+                for cap in pkg.get('recommends', []):
+                    recommends_rows.append((pkg_id, cap))
+                for cap in pkg.get('suggests', []):
+                    suggests_rows.append((pkg_id, cap))
+                for cap in pkg.get('supplements', []):
+                    supplements_rows.append((pkg_id, cap))
+                for cap in pkg.get('enhances', []):
+                    enhances_rows.append((pkg_id, cap))
 
             # Bulk insert dependencies
             if requires_rows:
@@ -397,6 +442,27 @@ class PackageDatabase:
                     "INSERT INTO obsoletes (pkg_id, capability) VALUES (?, ?)",
                     obsoletes_rows
                 )
+            # Weak dependencies
+            if recommends_rows:
+                self.conn.executemany(
+                    "INSERT INTO recommends (pkg_id, capability) VALUES (?, ?)",
+                    recommends_rows
+                )
+            if suggests_rows:
+                self.conn.executemany(
+                    "INSERT INTO suggests (pkg_id, capability) VALUES (?, ?)",
+                    suggests_rows
+                )
+            if supplements_rows:
+                self.conn.executemany(
+                    "INSERT INTO supplements (pkg_id, capability) VALUES (?, ?)",
+                    supplements_rows
+                )
+            if enhances_rows:
+                self.conn.executemany(
+                    "INSERT INTO enhances (pkg_id, capability) VALUES (?, ?)",
+                    enhances_rows
+                )
 
             self.conn.commit()
 
@@ -415,22 +481,13 @@ class PackageDatabase:
         Deletes from child tables first to avoid slow CASCADE.
         """
         # Delete dependencies first (faster than CASCADE)
-        self.conn.execute("""
-            DELETE FROM requires WHERE pkg_id IN
-            (SELECT id FROM packages WHERE media_id = ?)
-        """, (media_id,))
-        self.conn.execute("""
-            DELETE FROM provides WHERE pkg_id IN
-            (SELECT id FROM packages WHERE media_id = ?)
-        """, (media_id,))
-        self.conn.execute("""
-            DELETE FROM conflicts WHERE pkg_id IN
-            (SELECT id FROM packages WHERE media_id = ?)
-        """, (media_id,))
-        self.conn.execute("""
-            DELETE FROM obsoletes WHERE pkg_id IN
-            (SELECT id FROM packages WHERE media_id = ?)
-        """, (media_id,))
+        pkg_subquery = "(SELECT id FROM packages WHERE media_id = ?)"
+        for table in ('requires', 'provides', 'conflicts', 'obsoletes',
+                      'recommends', 'suggests', 'supplements', 'enhances'):
+            self.conn.execute(
+                f"DELETE FROM {table} WHERE pkg_id IN {pkg_subquery}",
+                (media_id,)
+            )
 
         # Now delete packages
         self.conn.execute("DELETE FROM packages WHERE media_id = ?", (media_id,))

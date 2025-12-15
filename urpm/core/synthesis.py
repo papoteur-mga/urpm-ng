@@ -170,6 +170,8 @@ def parse_synthesis(filename: Path) -> Iterator[Dict[str, Any]]:
                 'obsoletes': current_tags.get('obsoletes', []),
                 'suggests': current_tags.get('suggests', []),
                 'recommends': current_tags.get('recommends', []),
+                'supplements': current_tags.get('supplements', []),
+                'enhances': current_tags.get('enhances', []),
             }
 
             yield pkg
@@ -191,6 +193,10 @@ def parse_synthesis(filename: Path) -> Iterator[Dict[str, Any]]:
                 current_tags['suggests'] = list(parts[2:]) if len(parts) > 2 else []
             elif tag == 'recommends':
                 current_tags['recommends'] = list(parts[2:]) if len(parts) > 2 else []
+            elif tag == 'supplements':
+                current_tags['supplements'] = list(parts[2:]) if len(parts) > 2 else []
+            elif tag == 'enhances':
+                current_tags['enhances'] = list(parts[2:]) if len(parts) > 2 else []
 
 
 def parse_synthesis_to_list(filename: Path) -> List[Dict[str, Any]]:

@@ -42,7 +42,17 @@ def parse_capability(pool: solv.Pool, cap_str: str) -> solv.Dep:
     - "name(x86-64)[== 1.0]" -> arch-specific versioned
     - "name[*]" -> scriptlet dependency (treat as name only)
     - "name[*][>= 1.0]" -> scriptlet with version constraint
+    - "(pkgA or pkgB)" -> rich/boolean dependency (RPM 4.13+)
+    - "(pkgA if pkgB)" -> conditional dependency
     """
+    # Handle rich/boolean dependencies (start with parenthesis)
+    if cap_str.startswith('('):
+        try:
+            return pool.parserpmrichdep(cap_str)
+        except Exception:
+            # Fallback to simple dep on parse error
+            return pool.Dep(cap_str)
+
     # Strip [*] scriptlet marker if present (can appear anywhere)
     cap_str = cap_str.replace('[*]', '')
 
@@ -77,6 +87,14 @@ class TransactionType(Enum):
     REINSTALL = "reinstall"
 
 
+class InstallReason(Enum):
+    """Why a package is being installed."""
+    EXPLICIT = "explicit"      # User requested it
+    DEPENDENCY = "dependency"  # Required by another package
+    RECOMMENDED = "recommended"  # Recommended by another package
+    SUGGESTED = "suggested"    # Suggested by another package
+
+
 @dataclass
 class PackageAction:
     """A single package action in a transaction."""
@@ -87,6 +105,8 @@ class PackageAction:
     nevra: str
     size: int = 0
     media_name: str = ""
+    reason: InstallReason = InstallReason.DEPENDENCY
+    from_evr: str = ""  # Previous version for upgrades
 
 
 @dataclass
@@ -102,17 +122,20 @@ class Resolution:
 class Resolver:
     """Dependency resolver using libsolv."""
 
-    def __init__(self, db: PackageDatabase, arch: str = "x86_64", root: str = "/"):
+    def __init__(self, db: PackageDatabase, arch: str = "x86_64", root: str = "/",
+                 install_recommends: bool = True):
         """Initialize resolver.
 
         Args:
             db: Package database
             arch: System architecture
             root: RPM database root (default: /)
+            install_recommends: Install recommended packages (default: True)
         """
         self.db = db
         self.arch = arch
         self.root = root
+        self.install_recommends = install_recommends
         self.pool = None
         self._solvable_to_pkg = {}  # Map solvable id -> pkg dict
         self._installed_count = 0  # Number of installed packages loaded
@@ -240,6 +263,24 @@ class Resolver:
             if s:
                 s.add_deparray(solv.SOLVABLE_OBSOLETES, parse_capability(pool, cap))
 
+        # Bulk load weak dependencies (RPM 4.12+)
+        for table, solv_type in [
+            ('recommends', solv.SOLVABLE_RECOMMENDS),
+            ('suggests', solv.SOLVABLE_SUGGESTS),
+            ('supplements', solv.SOLVABLE_SUPPLEMENTS),
+            ('enhances', solv.SOLVABLE_ENHANCES),
+        ]:
+            cursor = self.db.conn.execute(f"""
+                SELECT d.pkg_id, d.capability
+                FROM {table} d
+                JOIN packages pkg ON d.pkg_id = pkg.id
+                WHERE pkg.media_id = ?
+            """, (media_id,))
+            for pkg_id, cap in cursor:
+                s = pkg_id_to_solvable.get(pkg_id)
+                if s:
+                    s.add_deparray(solv_type, parse_capability(pool, cap))
+
     def _load_rpmdb(self, pool: solv.Pool, repo: solv.Repo) -> int:
         """Load installed packages from rpmdb into libsolv repo.
 
@@ -353,6 +394,35 @@ class Resolver:
                     dep = pool.Dep(obs)
                 s.add_deparray(solv.SOLVABLE_OBSOLETES, dep)
 
+            # Add weak dependencies (RPM 4.12+)
+            weak_deps = [
+                (rpm.RPMTAG_RECOMMENDNAME, rpm.RPMTAG_RECOMMENDVERSION,
+                 rpm.RPMTAG_RECOMMENDFLAGS, solv.SOLVABLE_RECOMMENDS),
+                (rpm.RPMTAG_SUGGESTNAME, rpm.RPMTAG_SUGGESTVERSION,
+                 rpm.RPMTAG_SUGGESTFLAGS, solv.SOLVABLE_SUGGESTS),
+                (rpm.RPMTAG_SUPPLEMENTNAME, rpm.RPMTAG_SUPPLEMENTVERSION,
+                 rpm.RPMTAG_SUPPLEMENTFLAGS, solv.SOLVABLE_SUPPLEMENTS),
+                (rpm.RPMTAG_ENHANCENAME, rpm.RPMTAG_ENHANCEVERSION,
+                 rpm.RPMTAG_ENHANCEFLAGS, solv.SOLVABLE_ENHANCES),
+            ]
+
+            for name_tag, ver_tag, flag_tag, solv_type in weak_deps:
+                names = hdr[name_tag] or []
+                versions = hdr[ver_tag] or []
+                flags_list = hdr[flag_tag] or []
+
+                for i, dep_name in enumerate(names):
+                    if i < len(versions) and versions[i]:
+                        flags = flags_list[i] if i < len(flags_list) else 0
+                        solv_flags = self._rpm_flags_to_solv(flags)
+                        if solv_flags:
+                            dep = pool.Dep(dep_name).Rel(solv_flags, pool.Dep(versions[i]))
+                        else:
+                            dep = pool.Dep(dep_name)
+                    else:
+                        dep = pool.Dep(dep_name)
+                    s.add_deparray(solv_type, dep)
+
             # Store mapping
             self._solvable_to_pkg[s.id] = {
                 'name': name,
@@ -425,6 +495,9 @@ class Resolver:
         # Prefer packages compatible with already installed packages
         # This helps select php8.5-opcache when php8.5-* is already installed
         solver.set_flag(solv.Solver.SOLVER_FLAG_FOCUS_INSTALLED, 1)
+        # Handle weak dependencies (Recommends/Suggests)
+        if not self.install_recommends:
+            solver.set_flag(solv.Solver.SOLVER_FLAG_IGNORE_RECOMMENDED, 1)
         problems = solver.solve(jobs)
 
         if problems:
@@ -440,6 +513,9 @@ class Resolver:
         # Get transaction and order it for correct install sequence
         trans = solver.transaction()
         trans.order()
+
+        # Build set of explicitly requested package names (lowercase)
+        explicit_names = set(n.lower() for n in package_names)
 
         actions = []
         install_size = 0
@@ -463,6 +539,20 @@ class Resolver:
             else:
                 continue
 
+            # Determine install reason
+            reason = InstallReason.DEPENDENCY
+            if s.name.lower() in explicit_names:
+                reason = InstallReason.EXPLICIT
+            elif action == TransactionType.INSTALL:
+                # Check solver's decision reason
+                decision_reason, rule = solver.describe_decision(s)
+                if decision_reason == solv.Solver.SOLVER_REASON_RECOMMENDED:
+                    reason = InstallReason.RECOMMENDED
+                elif decision_reason == solv.Solver.SOLVER_REASON_WEAKDEP:
+                    reason = InstallReason.RECOMMENDED
+                elif decision_reason == solv.Solver.SOLVER_REASON_RESOLVE_JOB:
+                    reason = InstallReason.EXPLICIT
+
             size = pkg_info.get('size', 0)
             if action in (TransactionType.INSTALL, TransactionType.UPGRADE):
                 install_size += size
@@ -475,6 +565,7 @@ class Resolver:
                 nevra=f"{s.name}-{s.evr}.{s.arch}",
                 size=size,
                 media_name=pkg_info.get('media_name', ''),
+                reason=reason,
             ))
 
         return Resolution(
@@ -483,6 +574,68 @@ class Resolver:
             problems=[],
             install_size=install_size
         )
+
+    def find_available_suggests(self, package_names: List[str]) -> List[PackageAction]:
+        """Find packages that are suggested by the given packages.
+
+        Suggests are not automatically installed by libsolv, so we need to
+        find them separately and offer them to the user.
+
+        Args:
+            package_names: List of package names to check suggests for
+
+        Returns:
+            List of PackageAction for available suggested packages
+        """
+        if not self.pool:
+            return []
+
+        suggests = []
+        seen = set()
+        installed_names = set()
+
+        # Get names of installed packages
+        if self.pool.installed:
+            for s in self.pool.installed.solvables:
+                installed_names.add(s.name.lower())
+
+        # For each package, find its suggests
+        for pkg_name in package_names:
+            # Find the package in available repos
+            flags = solv.Selection.SELECTION_NAME | solv.Selection.SELECTION_CANON
+            sel = self.pool.select(pkg_name, flags)
+
+            for s in sel.solvables():
+                # Get suggests deps
+                suggests_deps = s.lookup_deparray(solv.SOLVABLE_SUGGESTS)
+                for dep in suggests_deps:
+                    # Find packages that satisfy this suggest
+                    providers = self.pool.whatprovides(dep)
+                    for provider in providers:
+                        # Skip if already installed or already in our list
+                        if provider.name.lower() in installed_names:
+                            continue
+                        if provider.name.lower() in seen:
+                            continue
+                        # Skip if it's a src package
+                        if provider.arch in ('src', 'nosrc'):
+                            continue
+
+                        seen.add(provider.name.lower())
+                        pkg_info = self._solvable_to_pkg.get(provider.id, {})
+
+                        suggests.append(PackageAction(
+                            action=TransactionType.INSTALL,
+                            name=provider.name,
+                            evr=provider.evr,
+                            arch=provider.arch,
+                            nevra=f"{provider.name}-{provider.evr}.{provider.arch}",
+                            size=pkg_info.get('size', 0),
+                            media_name=pkg_info.get('media_name', ''),
+                            reason=InstallReason.SUGGESTED,
+                        ))
+
+        return suggests
 
     def resolve_upgrade(self, package_names: List[str] = None) -> Resolution:
         """Resolve packages to upgrade.
@@ -557,6 +710,9 @@ class Resolver:
         solver.set_flag(solv.Solver.SOLVER_FLAG_ALLOW_VENDORCHANGE, 1)
         # Prefer packages compatible with already installed packages
         solver.set_flag(solv.Solver.SOLVER_FLAG_FOCUS_INSTALLED, 1)
+        # Handle weak dependencies (Recommends/Suggests)
+        if not self.install_recommends:
+            solver.set_flag(solv.Solver.SOLVER_FLAG_IGNORE_RECOMMENDED, 1)
 
         problems = solver.solve(jobs)
 
@@ -903,7 +1059,7 @@ class Resolver:
                     if line and not line.startswith('#'):
                         # Remove any trailing comments like " (reason)"
                         name = line.split()[0] if ' ' in line else line
-                        unrequested.add(name)
+                        unrequested.add(name.lower())  # Normalize to lowercase
             except (IOError, OSError):
                 pass
 
@@ -939,7 +1095,7 @@ class Resolver:
             True if successful
         """
         unrequested = self._get_unrequested_packages()
-        unrequested.update(package_names)
+        unrequested.update(n.lower() for n in package_names)
         return self._save_unrequested_packages(unrequested)
 
     def mark_as_explicit(self, package_names: List[str]) -> bool:
@@ -956,7 +1112,7 @@ class Resolver:
         """
         unrequested = self._get_unrequested_packages()
         for name in package_names:
-            unrequested.discard(name)
+            unrequested.discard(name.lower())
         return self._save_unrequested_packages(unrequested)
 
     def unmark_packages(self, package_names: List[str]) -> bool:
@@ -970,7 +1126,7 @@ class Resolver:
         """
         unrequested = self._get_unrequested_packages()
         for name in package_names:
-            unrequested.discard(name)
+            unrequested.discard(name.lower())
         return self._save_unrequested_packages(unrequested)
 
     def find_all_orphans(self) -> List[PackageAction]:
@@ -1353,9 +1509,11 @@ class Resolver:
         ts = rpm.TransactionSet(self.root)
         erase_set = set(n.lower() for n in erase_names)
 
-        # Build provides, requires maps and capability->provider index
+        # Build provides, requires, suggests, recommends maps
         pkg_provides = {}  # name -> set of capability names
         pkg_requires = {}  # name -> set of capability names
+        pkg_suggests = {}  # name -> set of capability names
+        pkg_recommends = {}  # name -> set of capability names
         cap_to_pkg = {}    # capability -> set of package names providing it
         name_to_original = {}  # lowercase name -> original case name
 
@@ -1381,19 +1539,51 @@ class Resolver:
                     requires.add(self._extract_cap_name(req))
             pkg_requires[name] = requires
 
-        # Find what the erased packages require (their direct dependencies)
+            # Also get suggests and recommends
+            suggests = set()
+            for sug in (hdr[rpm.RPMTAG_SUGGESTNAME] or []):
+                suggests.add(self._extract_cap_name(sug))
+            pkg_suggests[name] = suggests
+
+            recommends = set()
+            for rec in (hdr[rpm.RPMTAG_RECOMMENDNAME] or []):
+                recommends.add(self._extract_cap_name(rec))
+            pkg_recommends[name] = recommends
+
+        # Find suggests/recommends of erased packages that are in unrequested
+        # These should also be removed (they were installed alongside the main package)
+        suggested_orphans = set()
+        for name in erase_names:
+            orig_name = name_to_original.get(name.lower(), name)
+            # Check suggests
+            for cap in pkg_suggests.get(orig_name, set()):
+                for provider in cap_to_pkg.get(cap, set()):
+                    if provider.lower() in unrequested and provider.lower() not in erase_set:
+                        suggested_orphans.add(provider)
+            # Check recommends
+            for cap in pkg_recommends.get(orig_name, set()):
+                for provider in cap_to_pkg.get(cap, set()):
+                    if provider.lower() in unrequested and provider.lower() not in erase_set:
+                        suggested_orphans.add(provider)
+
+        # Add suggested orphans to the erase set for further orphan detection
+        extended_erase_set = erase_set | set(n.lower() for n in suggested_orphans)
+
+        # Find what the erased packages (including suggests) require
         erased_requires = set()
         for name in erase_names:
-            # Handle case sensitivity
             orig_name = name_to_original.get(name.lower(), name)
             erased_requires.update(pkg_requires.get(orig_name, set()))
+        # Also add requires of suggested orphans
+        for name in suggested_orphans:
+            erased_requires.update(pkg_requires.get(name, set()))
 
         # Find packages that satisfy those requirements and are marked as dependencies
-        # These are the ONLY potential orphan candidates (not all deps on the system)
-        potential_orphans = set()
+        potential_orphans = set(suggested_orphans)  # Start with suggested orphans
         for cap in erased_requires:
-            for provider in cap_to_pkg.get(cap, set()):
-                if provider.lower() in unrequested and provider.lower() not in erase_set:
+            providers = cap_to_pkg.get(cap, set())
+            for provider in providers:
+                if provider.lower() in unrequested and provider.lower() not in extended_erase_set:
                     potential_orphans.add(provider)
 
         if not potential_orphans:
@@ -1404,6 +1594,9 @@ class Resolver:
         for name in erase_names:
             orig_name = name_to_original.get(name.lower(), name)
             remaining_pkgs.discard(orig_name)
+        # Also remove suggested orphans from remaining
+        for name in suggested_orphans:
+            remaining_pkgs.discard(name)
 
         orphan_candidates = set()
         for name in potential_orphans:
@@ -1413,7 +1606,7 @@ class Resolver:
             for other_name in remaining_pkgs:
                 if other_name == name:
                     continue
-                if other_name.lower() in erase_set:
+                if other_name.lower() in extended_erase_set:
                     continue
 
                 other_requires = pkg_requires.get(other_name, set())
@@ -1438,7 +1631,7 @@ class Resolver:
                 for provider in cap_to_pkg.get(cap, set()):
                     if provider in orphan_candidates:
                         continue
-                    if provider.lower() in erase_set:
+                    if provider.lower() in extended_erase_set:
                         continue
                     if provider.lower() not in unrequested:
                         continue  # Explicit package, don't remove
@@ -1449,7 +1642,7 @@ class Resolver:
                     for other_name in remaining_pkgs:
                         if other_name == provider:
                             continue
-                        if other_name.lower() in erase_set:
+                        if other_name.lower() in extended_erase_set:
                             continue
                         if other_name in orphan_candidates:
                             continue

@@ -116,6 +116,11 @@ def create_parser() -> argparse.ArgumentParser:
         help='Skip recommended packages'
     )
     install_parser.add_argument(
+        '--with-suggests',
+        action='store_true',
+        help='Also install suggested packages'
+    )
+    install_parser.add_argument(
         '--all',
         action='store_true',
         help='Install for all matching families (e.g., both php8.4 and php8.5)'
@@ -296,7 +301,7 @@ def create_parser() -> argparse.ArgumentParser:
     # update / u
     # =========================================================================
     update_parser = subparsers.add_parser(
-        'update', aliases=['u'],
+        'update', aliases=['up'],
         help='Update packages or metadata'
     )
     update_parser.add_argument(
@@ -343,7 +348,7 @@ def create_parser() -> argparse.ArgumentParser:
     # upgrade (alias for update --all)
     # =========================================================================
     upgrade_parser = subparsers.add_parser(
-        'upgrade',
+        'upgrade', aliases=['u'],
         help='Upgrade all packages (alias for update --all)'
     )
     upgrade_parser.add_argument(
@@ -366,7 +371,12 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Skip GPG signature verification (not recommended)'
     )
-    
+    upgrade_parser.add_argument(
+        '--no-recommends',
+        action='store_true',
+        help='Skip recommended packages'
+    )
+
     # =========================================================================
     # autoremove / ar
     # =========================================================================
@@ -435,7 +445,17 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Add as disabled'
     )
-    
+    media_add.add_argument(
+        '--auto', '-y',
+        action='store_true',
+        help='Auto-import GPG key without confirmation'
+    )
+    media_add.add_argument(
+        '--nokey',
+        action='store_true',
+        help='Do not check/import GPG key'
+    )
+
     # media remove / r
     media_remove = media_subparsers.add_parser(
         'remove', aliases=['r'],
@@ -930,8 +950,125 @@ def cmd_media_list(args, db: PackageDatabase) -> int:
     return 0
 
 
+def _fetch_media_pubkey(url: str) -> bytes | None:
+    """Fetch pubkey from media_info/pubkey.
+
+    Args:
+        url: Media base URL
+
+    Returns:
+        Key data as bytes, or None if not found
+    """
+    import urllib.request
+    import urllib.error
+
+    pubkey_url = url.rstrip('/') + '/media_info/pubkey'
+    try:
+        with urllib.request.urlopen(pubkey_url, timeout=30) as response:
+            return response.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None  # No pubkey, that's OK
+        raise
+    except urllib.error.URLError:
+        return None
+
+
+def _get_gpg_key_info(key_data: bytes) -> dict | None:
+    """Parse GPG key info using gpg command.
+
+    Args:
+        key_data: Raw GPG key data
+
+    Returns:
+        Dict with 'keyid', 'fingerprint', 'uid', 'created' or None on error
+    """
+    import subprocess
+    import tempfile
+    import os
+
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.gpg', delete=False) as tmp:
+        tmp.write(key_data)
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ['gpg', '--show-keys', '--keyid-format', 'long', '--with-colons', tmp_path],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return None
+
+        info = {}
+        for line in result.stdout.split('\n'):
+            fields = line.split(':')
+            if fields[0] == 'pub':
+                # pub:...:keyid:created:...
+                info['keyid'] = fields[4][-8:].lower()  # Last 8 chars
+                info['keyid_long'] = fields[4].lower()
+                if fields[5]:
+                    info['created'] = fields[5]
+            elif fields[0] == 'fpr':
+                info['fingerprint'] = fields[9]
+            elif fields[0] == 'uid' and 'uid' not in info:
+                info['uid'] = fields[9]
+
+        return info if info.get('keyid') else None
+    finally:
+        os.unlink(tmp_path)
+
+
+def _is_key_in_rpm_keyring(keyid: str) -> bool:
+    """Check if a GPG key is already in the RPM keyring.
+
+    Args:
+        keyid: Key ID (8 hex chars, lowercase)
+
+    Returns:
+        True if key is installed
+    """
+    import rpm
+
+    ts = rpm.TransactionSet()
+    for hdr in ts.dbMatch('name', 'gpg-pubkey'):
+        version = hdr[rpm.RPMTAG_VERSION].lower()
+        if version == keyid:
+            return True
+    return False
+
+
+def _import_gpg_key(key_data: bytes) -> bool:
+    """Import GPG key into RPM keyring.
+
+    Args:
+        key_data: Raw GPG key data
+
+    Returns:
+        True on success
+    """
+    import subprocess
+    import tempfile
+    import os
+
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.gpg', delete=False) as tmp:
+        tmp.write(key_data)
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ['rpm', '--import', tmp_path],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0
+    finally:
+        os.unlink(tmp_path)
+
+
 def cmd_media_add(args, db: PackageDatabase) -> int:
     """Handle media add command."""
+    from . import colors
+    from ..core.install import check_root
+
     name = args.name
     url = args.url
 
@@ -939,6 +1076,68 @@ def cmd_media_add(args, db: PackageDatabase) -> int:
     if db.get_media(name):
         print(f"Media '{name}' already exists")
         return 1
+
+    # Check for pubkey in media_info (unless --nokey)
+    if not getattr(args, 'nokey', False):
+        print(f"Checking for GPG key at {url}/media_info/pubkey...")
+        try:
+            key_data = _fetch_media_pubkey(url)
+        except Exception as e:
+            print(colors.warning(f"Warning: could not fetch pubkey: {e}"))
+            key_data = None
+
+        if key_data:
+            key_info = _get_gpg_key_info(key_data)
+            if key_info:
+                keyid = key_info['keyid']
+                if _is_key_in_rpm_keyring(keyid):
+                    print(colors.success(f"  Key {keyid} already in keyring"))
+                else:
+                    # Key not in keyring - ask user or auto-import
+                    print(f"\n  Key ID:      {key_info.get('keyid_long', keyid)}")
+                    if key_info.get('fingerprint'):
+                        fp = key_info['fingerprint']
+                        # Format fingerprint in groups of 4
+                        fp_formatted = ' '.join([fp[i:i+4] for i in range(0, len(fp), 4)])
+                        print(f"  Fingerprint: {fp_formatted}")
+                    if key_info.get('uid'):
+                        print(f"  User ID:     {key_info['uid']}")
+                    if key_info.get('created'):
+                        from datetime import datetime
+                        try:
+                            ts = int(key_info['created'])
+                            dt = datetime.fromtimestamp(ts)
+                            print(f"  Created:     {dt.strftime('%Y-%m-%d')}")
+                        except (ValueError, OSError):
+                            pass
+                    print()
+
+                    auto = getattr(args, 'auto', False)
+                    if auto:
+                        do_import = True
+                    else:
+                        try:
+                            response = input("Import this key? [Y/n] ")
+                            do_import = response.lower() in ('', 'y', 'yes', 'o', 'oui')
+                        except (KeyboardInterrupt, EOFError):
+                            print("\nAborted")
+                            return 1
+
+                    if do_import:
+                        if not check_root():
+                            print(colors.error("Error: importing keys requires root privileges"))
+                            return 1
+                        if _import_gpg_key(key_data):
+                            print(colors.success(f"  Key {keyid} imported"))
+                        else:
+                            print(colors.error("  Failed to import key"))
+                            return 1
+                    else:
+                        print(colors.warning("  Key not imported - package signatures may fail"))
+            else:
+                print(colors.warning("  Warning: could not parse pubkey"))
+        else:
+            print(colors.dim("  No pubkey found"))
 
     media_id = db.add_media(
         name=name,
@@ -1294,7 +1493,7 @@ def cmd_cache_stats(args, db: PackageDatabase) -> int:
 def cmd_install(args, db: PackageDatabase) -> int:
     """Handle install command."""
     import signal
-    from ..core.resolver import Resolver, format_size
+    from ..core.resolver import Resolver, Resolution, format_size
     from ..core.download import Downloader, DownloadItem
 
     # Resolve virtual packages to concrete packages
@@ -1321,7 +1520,14 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print("Aborted.")
         return 1
 
-    resolver = Resolver(db)
+    from . import colors
+    from ..core.resolver import InstallReason
+
+    # Initial resolution with recommends
+    no_recommends = getattr(args, 'no_recommends', False)
+    with_suggests = getattr(args, 'with_suggests', False)
+
+    resolver = Resolver(db, install_recommends=not no_recommends)
     result = resolver.resolve_install(resolved_packages)
 
     if not result.success:
@@ -1334,52 +1540,130 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print("Nothing to do")
         return 0
 
-    # Determine which packages are explicit vs dependencies
-    # Include both the requested names AND the resolved concrete packages
-    explicit_names = set(_extract_pkg_name(p).lower() for p in args.packages)
-    explicit_names.update(p.lower() for p in resolved_packages)
+    # Categorize packages by install reason
+    explicit_pkgs = [a for a in result.actions if a.reason == InstallReason.EXPLICIT]
+    dep_pkgs = [a for a in result.actions if a.reason == InstallReason.DEPENDENCY]
+    rec_pkgs = [a for a in result.actions if a.reason == InstallReason.RECOMMENDED]
 
-    # Also include packages that provide what the user requested
-    # (e.g., user asked for 'nvim', resolver found 'neovim' which provides 'nvim')
-    requested_names = set(_extract_pkg_name(p).lower() for p in args.packages)
-    for action in result.actions:
-        # Check if this package provides any of the requested names
-        pkg_info = db.get_package(action.name)
-        if pkg_info and pkg_info.get('provides'):
-            for prov in pkg_info['provides']:
-                # Extract provide name (remove version constraints)
-                prov_name = prov.split('[')[0].split('=')[0].split('<')[0].split('>')[0].strip().lower()
-                if prov_name in requested_names:
-                    explicit_names.add(action.name.lower())
-                    break
+    # Build set of explicit package names for history recording
+    explicit_names = set(a.name.lower() for a in explicit_pkgs)
 
-    # Show transaction summary
-    from . import colors
-    print(f"\n{colors.bold(f'{len(result.actions)} packages to install')} ({format_size(result.install_size)})\n")
+    # Find available suggests (not in transaction yet)
+    all_to_install = [a.name for a in result.actions]
+    suggests = resolver.find_available_suggests(all_to_install)
 
-    for action in result.actions:
-        marker = "*" if action.name.lower() in explicit_names else " "
-        action_str = action.action.value
-        if action_str == 'install':
-            action_colored = colors.info(f"{action_str:10}")
-        elif action_str == 'upgrade':
-            action_colored = colors.info(f"{action_str:10}")
-        elif action_str == 'remove':
-            action_colored = colors.error(f"{action_str:10}")
-        else:
-            action_colored = f"{action_str:10}"
-        print(f"  {marker} {action_colored} {action.nevra}")
+    # Calculate sizes
+    explicit_size = sum(a.size for a in explicit_pkgs)
+    dep_size = sum(a.size for a in dep_pkgs)
+    rec_size = sum(a.size for a in rec_pkgs)
+    sug_size = sum(a.size for a in suggests)
+
+    # Show grouped summary
+    print(f"\n{colors.bold('Transaction summary:')}\n")
+
+    if explicit_pkgs:
+        print(f"  {colors.info(f'Requested ({len(explicit_pkgs)})')} - {format_size(explicit_size)}")
+        for a in explicit_pkgs[:5]:  # Show first 5
+            print(f"    {a.name}-{a.evr}")
+        if len(explicit_pkgs) > 5:
+            print(f"    ... and {len(explicit_pkgs) - 5} more")
+
+    if dep_pkgs:
+        print(f"  {colors.dim(f'Dependencies ({len(dep_pkgs)})')} - {format_size(dep_size)}")
+        for a in dep_pkgs[:5]:
+            print(f"    {a.name}-{a.evr}")
+        if len(dep_pkgs) > 5:
+            print(f"    ... and {len(dep_pkgs) - 5} more")
+
+    # Ask about recommends if there are any and not auto mode
+    install_recommends_final = True
+    if rec_pkgs and not args.auto and not no_recommends:
+        print(f"\n  {colors.success(f'Recommended ({len(rec_pkgs)})')} - {format_size(rec_size)}")
+        for a in rec_pkgs[:5]:
+            print(f"    {a.name}-{a.evr}")
+        if len(rec_pkgs) > 5:
+            print(f"    ... and {len(rec_pkgs) - 5} more")
+        try:
+            answer = input(f"\n  Install recommended packages? [O/n] ")
+            install_recommends_final = answer.lower() not in ('n', 'no', 'non')
+        except EOFError:
+            print("\nAborted")
+            return 1
+    elif rec_pkgs and no_recommends:
+        install_recommends_final = False
+        print(f"  {colors.dim(f'Recommended ({len(rec_pkgs)}) - skipped (--no-recommends)')}")
+    elif rec_pkgs:
+        # Auto mode - show but don't ask
+        print(f"  {colors.success(f'Recommended ({len(rec_pkgs)})')} - {format_size(rec_size)}")
+
+    # Ask about suggests if there are any and not auto mode
+    install_suggests = with_suggests
+    if suggests and not args.auto and not with_suggests:
+        print(f"\n  {colors.warning(f'Suggested ({len(suggests)})')} - {format_size(sug_size)}")
+        for a in suggests[:5]:
+            print(f"    {a.name}-{a.evr}")
+        if len(suggests) > 5:
+            print(f"    ... and {len(suggests) - 5} more")
+        try:
+            answer = input(f"\n  Install suggested packages? [o/N] ")
+            install_suggests = answer.lower() in ('o', 'oui', 'y', 'yes')
+        except EOFError:
+            print("\nAborted")
+            return 1
+    elif suggests and with_suggests:
+        print(f"  {colors.warning(f'Suggested ({len(suggests)})')} - {format_size(sug_size)}")
+
+    # Re-resolve if user changed their mind about recommends
+    if not install_recommends_final and rec_pkgs:
+        resolver = Resolver(db, install_recommends=False)
+        result = resolver.resolve_install(resolved_packages)
+        if not result.success:
+            print("Resolution failed:")
+            for p in result.problems:
+                print(f"  {p}")
+            return 1
+
+    # Re-resolve with suggests if user wants them (to get their dependencies)
+    if install_suggests and suggests:
+        suggest_names = [s.name for s in suggests]
+        all_packages = resolved_packages + suggest_names
+        resolver = Resolver(db, install_recommends=install_recommends_final)
+        result = resolver.resolve_install(all_packages)
+        if not result.success:
+            print("Resolution failed:")
+            for p in result.problems:
+                print(f"  {p}")
+            return 1
+        # Mark the suggest packages with the right reason
+        for action in result.actions:
+            if action.name in suggest_names:
+                action.reason = InstallReason.SUGGESTED
+
+    final_actions = list(result.actions)
+
+    # Recalculate total
+    total_size = sum(a.size for a in final_actions if a.action.value in ('install', 'upgrade'))
+
+    # Final confirmation
+    print(f"\n{colors.bold(f'Total: {len(final_actions)} packages')} ({format_size(total_size)})")
 
     if not args.auto:
-        print()
         try:
-            answer = input("Proceed? [y/N] ")
-            if answer.lower() not in ('y', 'yes', 'o', 'oui'):
+            answer = input("\nProceed with installation? [o/N] ")
+            if answer.lower() not in ('o', 'oui', 'y', 'yes'):
                 print("Aborted")
                 return 1
         except EOFError:
             print("\nAborted")
             return 1
+
+    # Update result.actions with final list
+    result = Resolution(
+        success=True,
+        actions=final_actions,
+        problems=[],
+        install_size=total_size
+    )
 
     if args.test:
         print("\n(dry run - no changes made)")
@@ -1459,7 +1743,8 @@ def cmd_install(args, db: PackageDatabase) -> int:
 
     # Record all packages in transaction
     for action in result.actions:
-        reason = 'explicit' if action.name.lower() in explicit_names else 'dependency'
+        # Use the install reason from the action
+        reason = action.reason.value  # 'explicit', 'dependency', 'recommended', 'suggested'
         db.record_package(
             transaction_id,
             action.nevra,
@@ -1513,10 +1798,11 @@ def cmd_install(args, db: PackageDatabase) -> int:
         db.complete_transaction(transaction_id)
 
         # Update installed-through-deps.list for urpmi compatibility
+        # Non-explicit packages (deps, recommends, suggests) go in the deps list
         dep_packages = [a.name for a in result.actions
-                        if a.name.lower() not in explicit_names]
+                        if a.reason != InstallReason.EXPLICIT]
         explicit_packages = [a.name for a in result.actions
-                            if a.name.lower() in explicit_names]
+                            if a.reason == InstallReason.EXPLICIT]
         if dep_packages:
             resolver.mark_as_dependency(dep_packages)
         if explicit_packages:
@@ -1722,7 +2008,7 @@ def cmd_update(args, db: PackageDatabase) -> int:
 
     # Determine what to upgrade
     packages = getattr(args, 'packages', []) or []
-    upgrade_all = getattr(args, 'all', False) or args.command == 'upgrade'
+    upgrade_all = getattr(args, 'all', False) or args.command in ('upgrade', 'u')
 
     if not packages and not upgrade_all:
         print("Specify packages to update, or use --all/-a for full system upgrade")
@@ -1736,7 +2022,8 @@ def cmd_update(args, db: PackageDatabase) -> int:
 
     # Resolve upgrades
     arch = platform.machine()
-    resolver = Resolver(db, arch=arch)
+    install_recommends = not getattr(args, 'no_recommends', False)
+    resolver = Resolver(db, arch=arch, install_recommends=install_recommends)
 
     if upgrade_all:
         print("Resolving system upgrade...")
@@ -4282,7 +4569,7 @@ def main(argv=None) -> int:
         elif args.command in ('erase', 'e'):
             return cmd_erase(args, db)
 
-        elif args.command in ('update', 'u', 'upgrade'):
+        elif args.command in ('update', 'up', 'upgrade', 'u'):
             return cmd_update(args, db)
 
         elif args.command in ('list', 'l'):
