@@ -13,34 +13,38 @@ from typing import Optional, List, Dict, Any
 
 # Imports are relative to package - bin/urpmd handles sys.path
 from ..core.database import PackageDatabase
+from ..core.config import (
+    PROD_BASE_DIR, PROD_DB_PATH, PROD_PID_FILE, PROD_PORT,
+    DEV_BASE_DIR, DEV_DB_PATH, DEV_PID_FILE, DEV_PORT,
+)
 from .server import UrpmdServer, DEFAULT_PORT, DEFAULT_HOST
 from .scheduler import Scheduler
+from .discovery import PeerDiscovery
 
 logger = logging.getLogger(__name__)
-
-# Default paths
-DEFAULT_DB_PATH = "/var/lib/urpm/packages.db"
-DEFAULT_CONFIG_PATH = "/etc/urpm/urpmd.conf"
-DEFAULT_CACHE_DIR = "/var/cache/urpm"
-DEFAULT_PID_FILE = "/run/urpmd.pid"
 
 
 class UrpmDaemon:
     """Main urpmd daemon class."""
 
     def __init__(self,
-                 db_path: str = DEFAULT_DB_PATH,
-                 host: str = DEFAULT_HOST,
-                 port: int = DEFAULT_PORT,
-                 cache_dir: str = DEFAULT_CACHE_DIR):
+                 db_path: str,
+                 base_dir: str,
+                 host: str,
+                 port: int,
+                 pid_file: str,
+                 dev_mode: bool = False):
         self.db_path = db_path
+        self.base_dir = Path(base_dir)
         self.host = host
         self.port = port
-        self.cache_dir = Path(cache_dir)
+        self.pid_file = pid_file
+        self.dev_mode = dev_mode
 
         self.db: Optional[PackageDatabase] = None
         self.server: Optional[UrpmdServer] = None
         self.scheduler: Optional[Scheduler] = None
+        self.discovery: Optional[PeerDiscovery] = None
 
         self._running = False
         self._start_time: Optional[datetime] = None
@@ -63,16 +67,20 @@ class UrpmDaemon:
         logger.info(f"Opening database: {self.db_path}")
         self.db = PackageDatabase(self.db_path)
 
-        # Ensure cache directory exists
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure base directory exists
+        self.base_dir.mkdir(parents=True, exist_ok=True)
 
         # Start HTTP server
         self.server = UrpmdServer(self.host, self.port)
         self.server.start(self)
 
         # Start scheduler for background tasks
-        self.scheduler = Scheduler(self)
+        self.scheduler = Scheduler(self, dev_mode=self.dev_mode)
         self.scheduler.start()
+
+        # Start peer discovery
+        self.discovery = PeerDiscovery(self, dev_mode=self.dev_mode)
+        self.discovery.start()
 
         logger.info("urpmd started successfully")
 
@@ -88,6 +96,9 @@ class UrpmDaemon:
         """Stop the daemon."""
         logger.info("Stopping urpmd...")
         self._running = False
+
+        if self.discovery:
+            self.discovery.stop()
 
         if self.scheduler:
             self.scheduler.stop()
@@ -136,7 +147,7 @@ class UrpmDaemon:
 
         # Write PID file
         pid = os.getpid()
-        with open(DEFAULT_PID_FILE, 'w') as f:
+        with open(self.pid_file, 'w') as f:
             f.write(str(pid))
 
     def _setup_signals(self):
@@ -172,8 +183,8 @@ class UrpmDaemon:
             'start_time': self._start_time.isoformat() if self._start_time else None,
             'uptime_seconds': uptime,
             'last_refresh': self._last_refresh.isoformat() if self._last_refresh else None,
-            'db_path': self.db_path,
-            'cache_dir': str(self.cache_dir),
+            'db_path': str(self.db_path),
+            'base_dir': str(self.base_dir),
             'host': self.host,
             'port': self.port,
         }
@@ -189,8 +200,8 @@ class UrpmDaemon:
                 'name': m['name'],
                 'url': m['url'],
                 'enabled': m['enabled'],
-                'update': m['update'],
-                'last_updated': m.get('last_updated'),
+                'update_media': m.get('update_media', 0),
+                'last_sync': m.get('last_sync'),
                 'package_count': m.get('package_count', 0),
             })
         return media
@@ -244,6 +255,7 @@ class UrpmDaemon:
             result = resolver.resolve_upgrade([])
 
             updates = []
+            total_size = 0
             for action in result.actions:
                 updates.append({
                     'name': action.name,
@@ -252,11 +264,12 @@ class UrpmDaemon:
                     'arch': action.arch,
                     'size': action.size,
                 })
+                total_size += action.size or 0
 
             return {
                 'count': len(updates),
                 'updates': updates,
-                'total_size': result.download_size,
+                'total_size': total_size,
             }
         except Exception as e:
             logger.error(f"Error checking updates: {e}")
@@ -276,19 +289,19 @@ class UrpmDaemon:
         if not self.db:
             return {'error': 'Database not initialized'}
 
-        from ..core.media import MediaManager
+        from ..core.sync import sync_media
 
         try:
-            manager = MediaManager(self.db)
-
             if media_name:
-                results = {media_name: manager.update_media(media_name, force=force)}
+                result = sync_media(self.db, media_name, force=force)
+                results = {media_name: {'success': result.success, 'packages': result.packages_count}}
             else:
                 results = {}
                 for media in self.db.list_media():
                     if media['enabled']:
                         name = media['name']
-                        results[name] = manager.update_media(name, force=force)
+                        result = sync_media(self.db, name, force=force)
+                        results[name] = {'success': result.success, 'packages': result.packages_count}
 
             self._last_refresh = datetime.now()
 
@@ -300,6 +313,109 @@ class UrpmDaemon:
         except Exception as e:
             logger.error(f"Error refreshing metadata: {e}")
             return {'error': str(e)}
+
+    def get_peers(self) -> List[Dict[str, Any]]:
+        """Get list of known peers."""
+        if self.discovery:
+            return self.discovery.get_peers()
+        return []
+
+    def register_peer(self, host: str, port: int, media: List[str]) -> Dict[str, Any]:
+        """Register or update a peer."""
+        if self.discovery:
+            return self.discovery.register_peer(host, port, media)
+        return {'error': 'Discovery not initialized'}
+
+    def check_have_packages(self, packages: List[str]) -> Dict[str, Any]:
+        """Check which packages are available in local cache.
+
+        Searches across all hostname/media directories for each filename.
+        The Mageia version is encoded in the filename (.mga10., .mga9., etc.)
+        so packages won't be confused across versions.
+
+        Args:
+            packages: List of RPM filenames to check
+
+        Returns:
+            Dict with 'available' (list with filename, size, path) and 'missing'
+        """
+        available = []
+        missing = []
+
+        medias_dir = self.base_dir / "medias"
+
+        if not medias_dir.exists():
+            return {
+                'available': [],
+                'missing': packages,
+                'available_count': 0,
+                'missing_count': len(packages),
+            }
+
+        for filename in packages:
+            if not filename or not filename.endswith('.rpm'):
+                missing.append(filename or '<invalid>')
+                continue
+
+            # Search for file across all hostname/media directories
+            found = False
+            for hostname_dir in medias_dir.iterdir():
+                if not hostname_dir.is_dir():
+                    continue
+                for media_dir in hostname_dir.iterdir():
+                    if not media_dir.is_dir():
+                        continue
+                    file_path = media_dir / filename
+                    if file_path.exists() and file_path.is_file():
+                        try:
+                            size = file_path.stat().st_size
+                            # Path relative to /media/ endpoint
+                            rel_path = f"{hostname_dir.name}/{media_dir.name}/{filename}"
+                            available.append({
+                                'filename': filename,
+                                'size': size,
+                                'path': rel_path,
+                            })
+                            found = True
+                            break  # Found it, stop searching
+                        except OSError:
+                            continue
+                if found:
+                    break
+
+            if not found:
+                missing.append(filename)
+
+        return {
+            'available': available,
+            'missing': missing,
+            'available_count': len(available),
+            'missing_count': len(missing),
+        }
+
+
+class ColoredFormatter(logging.Formatter):
+    """Colored log formatter for terminal output."""
+
+    # ANSI color codes
+    COLORS = {
+        'DEBUG': '\033[2m',      # Dim
+        'INFO': '',              # Normal (no color)
+        'WARNING': '\033[93m',   # Yellow/orange
+        'ERROR': '\033[91m',     # Bright red
+        'CRITICAL': '\033[91m',  # Bright red
+    }
+    RESET = '\033[0m'
+
+    def format(self, record):
+        # Get base formatted message
+        message = super().format(record)
+
+        # Apply color based on level
+        color = self.COLORS.get(record.levelname, '')
+        if color:
+            return f"{color}{message}{self.RESET}"
+        return message
 
 
 def main():
@@ -317,8 +433,7 @@ def main():
     parser.add_argument(
         '-p', '--port',
         type=int,
-        default=DEFAULT_PORT,
-        help=f'HTTP port (default: {DEFAULT_PORT})'
+        help=f'HTTP port (default: {PROD_PORT} prod, {DEV_PORT} dev)'
     )
     parser.add_argument(
         '-H', '--host',
@@ -326,30 +441,42 @@ def main():
         help=f'HTTP host (default: {DEFAULT_HOST})'
     )
     parser.add_argument(
-        '-d', '--db',
-        default=DEFAULT_DB_PATH,
-        help=f'Database path (default: {DEFAULT_DB_PATH})'
-    )
-    parser.add_argument(
-        '-c', '--cache',
-        default=DEFAULT_CACHE_DIR,
-        help=f'Cache directory (default: {DEFAULT_CACHE_DIR})'
-    )
-    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Verbose logging'
     )
+    parser.add_argument(
+        '--dev',
+        action='store_true',
+        help=f'Development mode: foreground + verbose + user paths ({DEV_BASE_DIR}/)'
+    )
 
     args = parser.parse_args()
+
+    # Select paths based on mode
+    if args.dev:
+        db_path = DEV_DB_PATH
+        base_dir = DEV_BASE_DIR
+        pid_file = DEV_PID_FILE
+        port = args.port or DEV_PORT
+        # Dev mode: listen on all interfaces for P2P testing
+        if args.host == DEFAULT_HOST:
+            args.host = '0.0.0.0'
+        args.foreground = True
+        args.verbose = True
+    else:
+        db_path = PROD_DB_PATH
+        base_dir = PROD_BASE_DIR
+        pid_file = PROD_PID_FILE
+        port = args.port or PROD_PORT
 
     # Setup logging
     level = logging.DEBUG if args.verbose else logging.INFO
 
     if args.foreground:
-        # Log to stderr when in foreground
+        # Log to stderr when in foreground with colors
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
+        handler.setFormatter(ColoredFormatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         ))
     else:
@@ -363,10 +490,12 @@ def main():
 
     # Create and start daemon
     daemon = UrpmDaemon(
-        db_path=args.db,
+        db_path=db_path,
+        base_dir=base_dir,
         host=args.host,
-        port=args.port,
-        cache_dir=args.cache,
+        port=port,
+        pid_file=pid_file,
+        dev_mode=args.dev,
     )
 
     daemon.start(foreground=args.foreground)

@@ -2,14 +2,21 @@
 
 import json
 import logging
+import mimetypes
 import os
 import sys
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Optional, Dict, Any
-from urllib.parse import urlparse, parse_qs
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse, parse_qs, unquote
 
 logger = logging.getLogger(__name__)
+
+# Initialize mimetypes
+mimetypes.init()
+mimetypes.add_type('application/x-rpm', '.rpm')
+mimetypes.add_type('application/x-compressed', '.cz')
 
 # Default configuration
 DEFAULT_PORT = 9876
@@ -42,20 +49,27 @@ class UrpmdHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests."""
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip('/')
+        path = unquote(parsed.path)  # Decode URL-encoded characters
         query = parse_qs(parsed.query)
 
         # Route requests
-        if path == '/ping' or path == '':
+        if path == '/' or path == '':
+            self.handle_root()
+        elif path == '/api/ping':
             self.handle_ping()
-        elif path == '/status':
+        elif path == '/api/status':
             self.handle_status()
-        elif path == '/media':
-            self.handle_media_list()
-        elif path == '/available':
+        elif path == '/api/media':
+            self.handle_media_api()
+        elif path == '/api/available':
             self.handle_available(query)
-        elif path == '/updates':
+        elif path == '/api/updates':
             self.handle_updates()
+        elif path == '/api/peers':
+            self.handle_peers()
+        elif path.startswith('/media'):
+            # File serving endpoint
+            self.handle_media_files(path)
         else:
             self.send_error_json(404, f"Unknown endpoint: {path}")
 
@@ -75,12 +89,29 @@ class UrpmdHandler(BaseHTTPRequestHandler):
             return
 
         # Route requests
-        if path == '/refresh':
+        if path == '/api/refresh':
             self.handle_refresh(data)
-        elif path == '/available':
+        elif path == '/api/available':
             self.handle_available_post(data)
+        elif path == '/api/announce':
+            self.handle_announce(data)
+        elif path == '/api/have':
+            self.handle_have(data)
         else:
             self.send_error_json(404, f"Unknown endpoint: {path}")
+
+    def handle_root(self):
+        """Root endpoint - service info."""
+        self.send_json({
+            'service': 'urpmd',
+            'version': '0.1.0',
+            'endpoints': {
+                'api': ['/api/ping', '/api/status', '/api/media', '/api/available',
+                        '/api/updates', '/api/refresh', '/api/peers', '/api/announce',
+                        '/api/have'],
+                'files': ['/media/'],
+            }
+        })
 
     def handle_ping(self):
         """Health check endpoint."""
@@ -99,14 +130,215 @@ class UrpmdHandler(BaseHTTPRequestHandler):
         status = self.daemon.get_status()
         self.send_json(status)
 
-    def handle_media_list(self):
-        """List configured media."""
+    def handle_media_api(self):
+        """List configured media (JSON API)."""
         if not self.daemon:
             self.send_error_json(500, "Daemon not initialized")
             return
 
         media = self.daemon.get_media_list()
         self.send_json({'media': media})
+
+    def handle_media_files(self, path: str):
+        """Serve media files and directory listings.
+
+        URL structure:
+            /media/                              → list hostnames
+            /media/<hostname>/                   → list media for this host
+            /media/<hostname>/<media>/           → list files (RPMs)
+            /media/<hostname>/<media>/media_info/→ list metadata files
+            /media/<hostname>/<media>/<file>     → serve file
+        """
+        if not self.daemon:
+            self.send_error_json(500, "Daemon not initialized")
+            return
+
+        # Parse path: /media/[hostname]/[media]/[subpath]
+        parts = path.split('/')
+        # parts[0] = '', parts[1] = 'media', parts[2] = hostname, etc.
+
+        if len(parts) <= 2 or (len(parts) == 3 and parts[2] == ''):
+            # /media/ → list hostnames
+            self._list_hostnames()
+        elif len(parts) == 3 or (len(parts) == 4 and parts[3] == ''):
+            # /media/<hostname>/ → list media for this host
+            hostname = parts[2]
+            self._list_media_for_host(hostname)
+        else:
+            # /media/<hostname>/<media>/... → directory or file
+            hostname = parts[2]
+            media_name = parts[3]
+            subpath = '/'.join(parts[4:]) if len(parts) > 4 else ''
+            self._serve_media_path(hostname, media_name, subpath)
+
+    def _list_hostnames(self):
+        """List available hostnames (mirror sources)."""
+        medias_dir = self.daemon.base_dir / "medias"
+
+        if not medias_dir.exists():
+            self.send_json({'hostnames': [], 'count': 0})
+            return
+
+        hostnames = []
+        for entry in sorted(medias_dir.iterdir()):
+            if entry.is_dir():
+                hostnames.append(entry.name)
+
+        # Check Accept header for response format
+        accept = self.headers.get('Accept', '')
+        if 'text/html' in accept or 'application/json' not in accept:
+            self._send_directory_html('/', hostnames, is_root=True)
+        else:
+            self.send_json({'hostnames': hostnames, 'count': len(hostnames)})
+
+    def _list_media_for_host(self, hostname: str):
+        """List media available for a specific hostname."""
+        host_dir = self.daemon.base_dir / "medias" / hostname
+
+        if not host_dir.exists():
+            self.send_error_json(404, f"Unknown host: {hostname}")
+            return
+
+        media_names = []
+        for entry in sorted(host_dir.iterdir()):
+            if entry.is_dir():
+                media_names.append(entry.name)
+
+        accept = self.headers.get('Accept', '')
+        if 'text/html' in accept or 'application/json' not in accept:
+            self._send_directory_html(f'/{hostname}/', media_names)
+        else:
+            self.send_json({'hostname': hostname, 'media': media_names, 'count': len(media_names)})
+
+    def _serve_media_path(self, hostname: str, media_name: str, subpath: str):
+        """Serve a file or directory listing within a media."""
+        media_dir = self.daemon.base_dir / "medias" / hostname / media_name
+        target_path = media_dir / subpath if subpath else media_dir
+
+        # Security: prevent path traversal
+        try:
+            target_path = target_path.resolve()
+            media_dir_resolved = media_dir.resolve()
+            if not str(target_path).startswith(str(media_dir_resolved)):
+                self.send_error_json(403, "Access denied")
+                return
+        except (OSError, ValueError):
+            self.send_error_json(400, "Invalid path")
+            return
+
+        if not target_path.exists():
+            self.send_error_json(404, f"Not found: {subpath or media_name}")
+            return
+
+        if target_path.is_dir():
+            self._send_directory_listing(target_path, hostname, media_name, subpath)
+        else:
+            self._send_file(target_path)
+
+    def _send_directory_listing(self, dir_path: Path, hostname: str, media_name: str, subpath: str):
+        """Send directory listing as JSON or HTML."""
+        entries = []
+        for entry in sorted(dir_path.iterdir()):
+            stat = entry.stat()
+            entries.append({
+                'name': entry.name,
+                'type': 'dir' if entry.is_dir() else 'file',
+                'size': stat.st_size if entry.is_file() else None,
+            })
+
+        accept = self.headers.get('Accept', '')
+        if 'text/html' in accept or 'application/json' not in accept:
+            names = [e['name'] + ('/' if e['type'] == 'dir' else '') for e in entries]
+            current_path = f'/{hostname}/{media_name}'
+            if subpath:
+                current_path += f'/{subpath}'
+            self._send_directory_html(current_path, names)
+        else:
+            self.send_json({
+                'hostname': hostname,
+                'media': media_name,
+                'path': subpath or '/',
+                'entries': entries,
+                'count': len(entries),
+            })
+
+    def _send_directory_html(self, current_path: str, items: List[str], is_root: bool = False):
+        """Send directory listing as HTML."""
+        title = f"Index of /media{current_path}"
+        lines = [
+            '<!DOCTYPE html>',
+            '<html><head>',
+            f'<title>{title}</title>',
+            '<style>',
+            'body { font-family: monospace; margin: 2em; }',
+            'a { text-decoration: none; }',
+            'a:hover { text-decoration: underline; }',
+            '.dir { color: #0066cc; }',
+            '.file { color: #333; }',
+            '</style>',
+            '</head><body>',
+            f'<h1>{title}</h1>',
+            '<hr><pre>',
+        ]
+
+        # Parent directory link
+        if not is_root:
+            parent = '/'.join(current_path.rstrip('/').split('/')[:-1]) or '/'
+            lines.append(f'<a href="/media{parent}">..</a>')
+
+        # List items
+        for item in items:
+            is_dir = item.endswith('/')
+            css_class = 'dir' if is_dir else 'file'
+            href = f"/media{current_path.rstrip('/')}/{item}"
+            lines.append(f'<a class="{css_class}" href="{href}">{item}</a>')
+
+        lines.extend([
+            '</pre><hr>',
+            '<p><em>urpmd file server</em></p>',
+            '</body></html>',
+        ])
+
+        body = '\n'.join(lines).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, file_path: Path):
+        """Send a file with appropriate Content-Type."""
+        try:
+            stat = file_path.stat()
+            file_size = stat.st_size
+        except OSError as e:
+            self.send_error_json(500, f"Cannot read file: {e}")
+            return
+
+        # Determine content type
+        content_type, _ = mimetypes.guess_type(str(file_path))
+        if content_type is None:
+            content_type = 'application/octet-stream'
+
+        # Send headers
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', file_size)
+        self.send_header('Content-Disposition', f'inline; filename="{file_path.name}"')
+        self.end_headers()
+
+        # Send file content
+        try:
+            with open(file_path, 'rb') as f:
+                # Send in chunks for large files
+                chunk_size = 64 * 1024  # 64 KB
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (OSError, BrokenPipeError) as e:
+            logger.warning(f"Error sending file {file_path}: {e}")
 
     def handle_available(self, query: Dict[str, list]):
         """Check package availability (GET with query params)."""
@@ -155,6 +387,70 @@ class UrpmdHandler(BaseHTTPRequestHandler):
         force = data.get('force', False)
 
         result = self.daemon.refresh_metadata(media_name, force)
+        self.send_json(result)
+
+    def handle_peers(self):
+        """List known peers."""
+        if not self.daemon:
+            self.send_error_json(500, "Daemon not initialized")
+            return
+
+        peers = self.daemon.get_peers()
+        self.send_json({'peers': peers, 'count': len(peers)})
+
+    def handle_announce(self, data: Dict[str, Any]):
+        """Handle peer announcement (called by other urpmd instances)."""
+        if not self.daemon:
+            self.send_error_json(500, "Daemon not initialized")
+            return
+
+        # Get peer info from request
+        host = data.get('host')
+        port = data.get('port')
+        media_list = data.get('media', [])
+
+        if not host or not port:
+            self.send_error_json(400, "Missing 'host' or 'port' in request")
+            return
+
+        # Register the peer
+        result = self.daemon.register_peer(host, port, media_list)
+        self.send_json(result)
+
+    def handle_have(self, data: Dict[str, Any]):
+        """Check which packages are available in local cache.
+
+        Request body:
+            {
+                "packages": ["foo-1.0-1.mga10.x86_64.rpm", "bar-2.0-1.mga10.x86_64.rpm", ...]
+            }
+
+        Response:
+            {
+                "available": [
+                    {"filename": "foo-1.0-1.mga10.x86_64.rpm", "size": 12345, "path": "hostname/media/foo-1.0-1.mga10.x86_64.rpm"}
+                ],
+                "missing": ["bar-2.0-1.mga10.x86_64.rpm"],
+                "available_count": 1,
+                "missing_count": 1
+            }
+
+        The 'path' can be used to download: http://peer:port/media/{path}
+        """
+        if not self.daemon:
+            self.send_error_json(500, "Daemon not initialized")
+            return
+
+        packages = data.get('packages', [])
+        if not packages:
+            self.send_error_json(400, "Missing 'packages' in request body")
+            return
+
+        if not isinstance(packages, list):
+            self.send_error_json(400, "'packages' must be a list of filenames")
+            return
+
+        result = self.daemon.check_have_packages(packages)
         self.send_json(result)
 
 
