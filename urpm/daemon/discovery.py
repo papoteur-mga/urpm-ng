@@ -16,11 +16,12 @@ if TYPE_CHECKING:
     from .daemon import UrpmDaemon
 
 from ..core.database import PackageDatabase
+from ..core.config import PROD_DISCOVERY_PORT, DEV_DISCOVERY_PORT
 
 logger = logging.getLogger(__name__)
 
 # Discovery settings
-DEFAULT_DISCOVERY_PORT = 9878  # UDP port for discovery broadcasts
+DEFAULT_DISCOVERY_PORT = PROD_DISCOVERY_PORT  # UDP port for discovery broadcasts
 BROADCAST_INTERVAL = 60  # Seconds between broadcasts
 PEER_TIMEOUT = 180  # Seconds before considering a peer dead
 DEV_BROADCAST_INTERVAL = 15  # Shorter interval for dev mode
@@ -82,12 +83,13 @@ class PeerDiscovery:
         if dev_mode:
             self.broadcast_interval = DEV_BROADCAST_INTERVAL
             self.peer_timeout = DEV_PEER_TIMEOUT
+            self.discovery_port = DEV_DISCOVERY_PORT
         else:
             self.broadcast_interval = BROADCAST_INTERVAL
             self.peer_timeout = PEER_TIMEOUT
+            self.discovery_port = PROD_DISCOVERY_PORT
 
         # UDP socket for discovery
-        self.discovery_port = DEFAULT_DISCOVERY_PORT
         self._udp_socket: Optional[socket.socket] = None
 
         # Threads

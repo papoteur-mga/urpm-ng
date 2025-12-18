@@ -34,12 +34,14 @@ PROD_BASE_DIR = Path("/var/lib/urpm")
 PROD_DB_PATH = PROD_BASE_DIR / "packages.db"
 PROD_PID_FILE = Path("/run/urpmd.pid")
 PROD_PORT = 9876
+PROD_DISCOVERY_PORT = 9878  # UDP port for peer discovery
 
 # DEV paths (separate directory, also requires root but isolated from prod)
 DEV_BASE_DIR = Path("/var/lib/urpm-dev")
 DEV_DB_PATH = DEV_BASE_DIR / "packages.db"
 DEV_PID_FILE = DEV_BASE_DIR / "urpmd.pid"
 DEV_PORT = 9877  # Different port so both daemons can coexist
+DEV_DISCOVERY_PORT = 9879  # UDP port for peer discovery (dev mode)
 
 # Cache for detected mode (avoid repeated filesystem checks)
 _cached_config: Optional[dict] = None

@@ -14,13 +14,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
+from .config import PROD_PORT, DEV_PORT, PROD_DISCOVERY_PORT, DEV_DISCOVERY_PORT, is_dev_mode
+
 logger = logging.getLogger(__name__)
 
-# Discovery constants (same as daemon/discovery.py)
-DEFAULT_DISCOVERY_PORT = 9878
+# Discovery constants
 DISCOVERY_MAGIC = b'URPMD1'
-DEFAULT_URPMD_PORT = 9876
-DEV_URPMD_PORT = 9877
+DEFAULT_URPMD_PORT = PROD_PORT
+DEV_URPMD_PORT = DEV_PORT
+DEFAULT_DISCOVERY_PORT = PROD_DISCOVERY_PORT
 
 
 @dataclass
@@ -55,15 +57,18 @@ class PeerPackageInfo:
 class PeerClient:
     """Client for discovering peers and querying package availability."""
 
-    def __init__(self, urpmd_port: int = None, timeout: float = 2.0):
+    def __init__(self, urpmd_port: int = None, timeout: float = 2.0, dev_mode: bool = False):
         """Initialize peer client.
 
         Args:
             urpmd_port: Local urpmd port to query (None = auto-detect)
             timeout: Timeout for HTTP requests in seconds
+            dev_mode: If True, use dev discovery port (9879) instead of prod (9878)
         """
         self.urpmd_port = urpmd_port
         self.timeout = timeout
+        self.dev_mode = dev_mode
+        self.discovery_port = DEV_DISCOVERY_PORT if dev_mode else PROD_DISCOVERY_PORT
         self._peers: List[Peer] = []
 
     def discover_peers(self) -> List[Peer]:
@@ -142,7 +147,7 @@ class PeerClient:
                 'version': '0.1.0',
             }
             data = DISCOVERY_MAGIC + json.dumps(message).encode('utf-8')
-            sock.sendto(data, ('<broadcast>', DEFAULT_DISCOVERY_PORT))
+            sock.sendto(data, ('<broadcast>', self.discovery_port))
 
             # Collect responses
             end_time = socket.getdefaulttimeout()
@@ -362,5 +367,5 @@ def get_peer_client() -> PeerClient:
     """Get or create the default peer client."""
     global _client
     if _client is None:
-        _client = PeerClient()
+        _client = PeerClient(dev_mode=is_dev_mode())
     return _client

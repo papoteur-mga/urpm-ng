@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Callable, Tuple, Dict, Set
 
 from .database import PackageDatabase
-from .config import get_base_dir
+from .config import get_base_dir, is_dev_mode
 from .peer_client import (
     PeerClient, Peer, create_download_plan, summarize_download_plan,
     DownloadAssignment
@@ -755,7 +755,7 @@ class Downloader:
         if self.use_peers:
             try:
                 if self._peer_client is None:
-                    self._peer_client = PeerClient()
+                    self._peer_client = PeerClient(dev_mode=is_dev_mode())
 
                 t0 = _time.time()
                 peers = self._peer_client.discover_peers()

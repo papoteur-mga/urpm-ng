@@ -19,7 +19,7 @@ urpmi python3-libsolv python3-zstandard
 
 If you want to use P2P package sharing between LAN machines, open these ports:
 - **TCP 9876** (production) or **TCP 9877** (dev mode) - urpmd HTTP API
-- **UDP 5353** - mDNS for peer discovery
+- **UDP 9878** (production) or **UDP 9879** (dev mode) - Peer discovery broadcasts
 
 Use the Mageia Control Center (MCC) > Security > Firewall, or edit `/etc/shorewall/rules` directly.
 
