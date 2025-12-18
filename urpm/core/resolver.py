@@ -504,6 +504,30 @@ class Resolver:
                 # Try provides match
                 sel = self.pool.select(name, solv.Selection.SELECTION_PROVIDES)
 
+                if not sel.isempty() and name not in choices:
+                    # Check if multiple different packages provide this capability
+                    provider_names = set()
+                    for s in sel.solvables():
+                        if s.repo and s.repo != self.pool.installed:
+                            provider_names.add(s.name)
+
+                    if len(provider_names) > 1:
+                        # Multiple providers - need user choice before resolving
+                        # Sort by version (descending) to show newest first
+                        sorted_providers = self._prioritize_providers(
+                            list(provider_names), max_count=10
+                        )
+                        return Resolution(
+                            success=False,
+                            actions=[],
+                            problems=[],
+                            alternatives=[Alternative(
+                                capability=name,
+                                required_by="",  # User's request, not a dependency
+                                providers=sorted_providers
+                            )]
+                        )
+
             if sel.isempty():
                 not_found.append(name)
             else:

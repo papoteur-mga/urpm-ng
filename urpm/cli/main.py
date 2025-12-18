@@ -1942,7 +1942,11 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
         # Handle alternatives (multiple providers for same capability)
         if result.alternatives and not auto_mode:
             for alt in result.alternatives:
-                print(f"\nTo satisfy dependency '{alt.capability}' of '{alt.required_by}', one of these packages is needed:")
+                if alt.required_by:
+                    print(f"\nTo satisfy dependency '{alt.capability}' of '{alt.required_by}', one of these packages is needed:")
+                else:
+                    # User requested a virtual package (e.g., "php") - multiple packages provide it
+                    print(f"\nOne of the following packages is needed to provide '{alt.capability}':")
                 for i, provider in enumerate(alt.providers, 1):
                     print(f"  {i}- {provider}")
                 while True:
