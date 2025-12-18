@@ -48,8 +48,6 @@ def print_missing_dependencies(missing: list):
     for pkg, purpose in missing:
         print(f"  - {pkg} ({purpose})", file=sys.stderr)
     print(f"\nInstall with:", file=sys.stderr)
-    print(f"  dnf install {' '.join(pkg for pkg, _ in missing)}", file=sys.stderr)
-    print(f"  # or", file=sys.stderr)
     print(f"  urpmi {' '.join(pkg for pkg, _ in missing)}", file=sys.stderr)
 
 

@@ -16,6 +16,7 @@ from ..core.database import PackageDatabase
 from ..core.config import (
     PROD_BASE_DIR, PROD_DB_PATH, PROD_PID_FILE, PROD_PORT,
     DEV_BASE_DIR, DEV_DB_PATH, DEV_PID_FILE, DEV_PORT,
+    is_dev_mode, get_db_path, get_base_dir,
 )
 from .server import UrpmdServer, DEFAULT_PORT, DEFAULT_HOST
 from .scheduler import Scheduler
@@ -448,15 +449,33 @@ def main():
     parser.add_argument(
         '--dev',
         action='store_true',
-        help=f'Development mode: foreground + verbose + user paths ({DEV_BASE_DIR}/)'
+        help=f'Force development mode (auto-detected from .urpm.local or dev tree)'
+    )
+    parser.add_argument(
+        '--prod',
+        action='store_true',
+        help=f'Force production mode (ignore .urpm.local)'
     )
 
     args = parser.parse_args()
 
+    # Determine mode: explicit flags override auto-detection
+    if args.dev and args.prod:
+        print("Error: cannot specify both --dev and --prod", file=sys.stderr)
+        sys.exit(1)
+
+    if args.prod:
+        dev_mode = False
+    elif args.dev:
+        dev_mode = True
+    else:
+        # Auto-detect based on .urpm.local or running from dev tree
+        dev_mode = is_dev_mode()
+
     # Select paths based on mode
-    if args.dev:
-        db_path = DEV_DB_PATH
-        base_dir = DEV_BASE_DIR
+    if dev_mode:
+        db_path = get_db_path(dev_mode=True)
+        base_dir = get_base_dir(dev_mode=True)
         pid_file = DEV_PID_FILE
         port = args.port or DEV_PORT
         # Dev mode: listen on all interfaces for P2P testing
@@ -465,8 +484,8 @@ def main():
         args.foreground = True
         args.verbose = True
     else:
-        db_path = PROD_DB_PATH
-        base_dir = PROD_BASE_DIR
+        db_path = get_db_path(dev_mode=False)
+        base_dir = get_base_dir(dev_mode=False)
         pid_file = PROD_PID_FILE
         port = args.port or PROD_PORT
 
@@ -495,7 +514,7 @@ def main():
         host=args.host,
         port=port,
         pid_file=pid_file,
-        dev_mode=args.dev,
+        dev_mode=dev_mode,
     )
 
     daemon.start(foreground=args.foreground)

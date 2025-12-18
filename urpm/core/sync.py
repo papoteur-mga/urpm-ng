@@ -321,7 +321,7 @@ def sync_media(db: PackageDatabase, media_name: str,
             )
 
         # Copy files to permanent cache (mirrors structure)
-        # Structure: ~/.cache/urpm/medias/<hostname>/<media_name>/media_info/
+        # Structure: <base_dir>/medias/<hostname>/<media_name>/media_info/
         cache_media_dir = get_media_cache_dir(media_name, media_url)
         cache_media_info = cache_media_dir / "media_info"
         cache_media_info.mkdir(parents=True, exist_ok=True)

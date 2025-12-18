@@ -209,8 +209,7 @@ class PackageDatabase:
 
         Args:
             db_path: Path to SQLite database file.
-                     If None, uses PROD path (/var/lib/urpm/) when root,
-                     DEV path (~/.cache/urpm/) otherwise.
+                     If None, auto-detects based on .urpm.local or environment.
         """
         if db_path is None:
             from .config import get_db_path

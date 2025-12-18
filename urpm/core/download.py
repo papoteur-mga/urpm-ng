@@ -15,14 +15,11 @@ from pathlib import Path
 from typing import List, Optional, Callable, Tuple
 
 from .database import PackageDatabase
+from .config import get_base_dir
 from .peer_client import (
     PeerClient, Peer, create_download_plan, summarize_download_plan,
     DownloadAssignment
 )
-
-
-# Default cache directory (mirrors structure)
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "urpm"
 
 
 def get_hostname_from_url(url: str) -> str:
@@ -81,7 +78,7 @@ class Downloader:
             max_workers: Max parallel downloads
             use_peers: Whether to use P2P peer discovery for downloads
         """
-        self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
+        self.cache_dir = cache_dir or get_base_dir()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_workers = max_workers
         self.use_peers = use_peers
@@ -90,7 +87,7 @@ class Downloader:
     def get_cache_path(self, item: DownloadItem) -> Path:
         """Get cache path for a download item.
 
-        Structure: ~/.cache/urpm/medias/<hostname>/<media_name>/*.rpm
+        Structure: <base_dir>/medias/<hostname>/<media_name>/*.rpm
         """
         if item.media_name and item.media_url:
             media_dir = self.cache_dir / "medias" / item.hostname / item.media_name
