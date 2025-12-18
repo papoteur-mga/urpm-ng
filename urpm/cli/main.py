@@ -4343,6 +4343,27 @@ def cmd_key(args) -> int:
         return 1
 
 
+def _query_daemon_peers() -> list:
+    """Query local urpmd for discovered peers."""
+    import json
+    import urllib.request
+    import urllib.error
+    from ..core.config import PROD_PORT, DEV_PORT
+
+    # Try dev port first, then prod
+    for port in [DEV_PORT, PROD_PORT]:
+        try:
+            url = f"http://127.0.0.1:{port}/api/peers"
+            req = urllib.request.Request(url)
+            req.add_header('Accept', 'application/json')
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                return data.get('peers', [])
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+            continue
+    return []
+
+
 def cmd_peer(args, db: PackageDatabase) -> int:
     """Handle peer command - manage P2P peers and provenance."""
     from datetime import datetime
@@ -4356,35 +4377,57 @@ def cmd_peer(args, db: PackageDatabase) -> int:
 
     # peer list - show peer stats
     if args.peer_command in ('list', 'ls'):
+        # Query daemon for discovered peers
+        discovered_peers = _query_daemon_peers()
         stats = db.get_peer_stats()
         blacklisted = db.list_blacklisted_peers()
         blacklisted_hosts = {(b['peer_host'], b['peer_port']) for b in blacklisted}
 
-        if not stats and not blacklisted:
-            print("No peer download history recorded yet.")
-            print("P2P downloads will be tracked after your next package installation.")
+        has_content = discovered_peers or stats or blacklisted
+
+        if not has_content:
+            print("No peers discovered and no download history.")
+            print("Make sure urpmd is running for peer discovery.")
             return 0
 
+        # Show discovered peers from daemon
+        if discovered_peers:
+            print(colors.bold("Discovered peers on LAN:\n"))
+            print(f"{'Peer':<30} {'Media':>8} {'Last seen':<20} {'Status'}")
+            print("-" * 70)
+            for p in discovered_peers:
+                peer_id = f"{p['host']}:{p['port']}"
+                media_count = len(p.get('media', []))
+                last_seen = p.get('last_seen', '')[:19].replace('T', ' ')  # ISO format to readable
+
+                # Check status
+                if (p['host'], p['port']) in blacklisted_hosts or \
+                   (p['host'], None) in blacklisted_hosts:
+                    status = colors.error("BLACKLISTED")
+                elif p.get('alive', True):
+                    status = colors.ok("online")
+                else:
+                    status = colors.warn("offline")
+
+                print(f"{peer_id:<30} {media_count:>8} {last_seen:<20} {status}")
+            print()
+        else:
+            print(colors.warn("No peers discovered on LAN (is urpmd running?)\n"))
+
+        # Show download statistics
         if stats:
-            print(colors.bold("Peer download statistics:\n"))
-            print(f"{'Peer':<30} {'Downloads':>10} {'Size':>12} {'Last download':<20} {'Status'}")
-            print("-" * 90)
+            print(colors.bold("Download history:\n"))
+            print(f"{'Peer':<30} {'Downloads':>10} {'Size':>12} {'Last download':<20}")
+            print("-" * 75)
             for s in stats:
                 peer_id = f"{s['peer_host']}:{s['peer_port']}"
                 size_mb = (s['total_bytes'] or 0) / (1024 * 1024)
                 last_dl = datetime.fromtimestamp(s['last_download']).strftime('%Y-%m-%d %H:%M')
-
-                # Check if blacklisted
-                if (s['peer_host'], s['peer_port']) in blacklisted_hosts or \
-                   (s['peer_host'], None) in blacklisted_hosts:
-                    status = colors.error("BLACKLISTED")
-                else:
-                    status = colors.ok("active")
-
-                print(f"{peer_id:<30} {s['download_count']:>10} {size_mb:>10.1f}MB {last_dl:<20} {status}")
+                print(f"{peer_id:<30} {s['download_count']:>10} {size_mb:>10.1f}MB {last_dl:<20}")
+            print()
 
         if blacklisted:
-            print(colors.bold("\nBlacklisted peers:\n"))
+            print(colors.bold("Blacklisted peers:\n"))
             for b in blacklisted:
                 port_str = f":{b['peer_port']}" if b['peer_port'] else " (all ports)"
                 bl_time = datetime.fromtimestamp(b['blacklist_time']).strftime('%Y-%m-%d %H:%M')
