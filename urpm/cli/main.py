@@ -226,8 +226,8 @@ def create_parser() -> argparse.ArgumentParser:
         help='Erase (remove) packages'
     )
     erase_parser.add_argument(
-        'packages', nargs='+',
-        help='Package names to erase'
+        'packages', nargs='*',
+        help='Package names to erase (optional with --auto-orphans)'
     )
     erase_parser.add_argument(
         '--auto', '-y',
@@ -242,7 +242,12 @@ def create_parser() -> argparse.ArgumentParser:
     erase_parser.add_argument(
         '--auto-orphans',
         action='store_true',
-        help='Also remove orphan dependencies'
+        help='Also remove orphan dependencies (implied by -y unless --keep-orphans)'
+    )
+    erase_parser.add_argument(
+        '--keep-orphans',
+        action='store_true',
+        help='Do not remove orphan dependencies'
     )
     erase_parser.add_argument(
         '--force',
@@ -2464,12 +2469,22 @@ def cmd_erase(args, db: PackageDatabase) -> int:
         print(colors.dim("  (This message will not appear again)"))
         clear_background_error()
 
+    # If --auto-orphans without packages, delegate to cmd_autoremove (urpme compat)
+    clean_deps = getattr(args, 'auto_orphans', False)
+    if clean_deps and not args.packages:
+        return cmd_autoremove(args, db)
+
+    # Must have packages if not --auto-orphans
+    if not args.packages:
+        print(colors.error("Error: no packages specified"))
+        print(colors.dim("  Use --auto-orphans to remove orphan dependencies"))
+        return 1
+
     # Debug: save previous state and clear debug files at start
     _copy_installed_deps_list(dest=DEBUG_PREV_INSTALLED_DEPS)
     _clear_debug_file(DEBUG_LAST_REMOVED_DEPS)
 
     # Check root
-
     if not check_root():
         print(colors.error("Error: erase requires root privileges"))
         return 1
@@ -2477,8 +2492,7 @@ def cmd_erase(args, db: PackageDatabase) -> int:
     # Resolve what to remove
     arch = platform.machine()
     resolver = Resolver(db, arch=arch)
-    clean_deps = getattr(args, 'auto_orphans', False)
-    result = resolver.resolve_remove(args.packages, clean_deps=clean_deps)
+    result = resolver.resolve_remove(args.packages, clean_deps=False)
 
     if not result.success:
         print(colors.error("Resolution failed:"))
@@ -2509,24 +2523,23 @@ def cmd_erase(args, db: PackageDatabase) -> int:
     explicit = [a for a in result.actions if a.name.lower() in explicit_names]
     deps = [a for a in result.actions if a.name.lower() not in explicit_names]
 
-    # Find orphaned dependencies (packages in unrequested that are no longer needed)
-    erase_names = [a.name for a in result.actions]
-    orphans = resolver.find_erase_orphans(
-        erase_names,
-        erase_recommends=args.erase_recommends,
-        keep_suggests=args.keep_suggests
-    )
+    # Find orphaned dependencies unless --keep-orphans
+    keep_orphans = getattr(args, 'keep_orphans', False)
+    orphans = []
+    include_orphans = False
 
-    all_actions = result.actions
+    if not keep_orphans:
+        erase_names = [a.name for a in result.actions]
+        orphans = resolver.find_erase_orphans(
+            erase_names,
+            erase_recommends=getattr(args, 'erase_recommends', False),
+            keep_suggests=getattr(args, 'keep_suggests', False)
+        )
+
+    all_actions = list(result.actions)
     total_size = result.remove_size
 
-    # Add orphans to the removal
-    if orphans:
-        all_actions = list(result.actions) + orphans
-        for o in orphans:
-            total_size += o.size
-
-    # Show what will be erased
+    # Show what will be erased (without orphans first)
     print(f"\n{colors.bold(f'The following {len(all_actions)} package(s) will be erased:')}")
 
     if explicit:
@@ -2539,10 +2552,39 @@ def cmd_erase(args, db: PackageDatabase) -> int:
         for action in deps:
             print(f"    {action.nevra}")
 
+    # Handle orphans: ask or auto-include
     if orphans:
-        print(f"\n  {colors.warning(f'Orphaned dependencies ({len(orphans)}):')}")
-        for action in orphans:
-            print(f"    {action.nevra}")
+        # Determine if we should auto-include orphans
+        # --auto-orphans OR (--auto AND NOT --keep-orphans)
+        auto_include_orphans = clean_deps or (args.auto and not keep_orphans)
+
+        if auto_include_orphans:
+            # Include orphans automatically
+            include_orphans = True
+            print(f"\n  {colors.warning(f'Orphaned dependencies ({len(orphans)}):')}")
+            for action in orphans:
+                print(f"    {action.nevra}")
+        else:
+            # Ask user about orphans
+            print(f"\n  {colors.dim(f'Orphaned dependencies that could be removed ({len(orphans)}):')}")
+            for action in orphans:
+                print(f"    {colors.dim(action.nevra)}")
+            try:
+                response = input(f"\n  Also remove these {len(orphans)} orphaned packages? [y/N] ")
+                include_orphans = response.lower() in ('y', 'yes')
+                if include_orphans:
+                    print(colors.success("  Orphans will be removed"))
+                else:
+                    print(colors.dim("  Orphans will be kept"))
+            except (KeyboardInterrupt, EOFError):
+                print("\n  Orphans will be kept")
+                include_orphans = False
+
+    # Add orphans to the removal if confirmed
+    if include_orphans and orphans:
+        all_actions = all_actions + orphans
+        for o in orphans:
+            total_size += o.size
 
     if total_size > 0:
         print(f"\nDisk space freed: {colors.success(format_size(total_size))}")
