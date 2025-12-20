@@ -9,10 +9,10 @@ urpm-ng is a complete rewrite of the classic urpmi toolset, providing faster per
 ### Required packages
 
 ```bash
-urpmi python3-libsolv python3-zstandard
+urpmi python3-solv python3-zstandard
 ```
 
-- **python3-libsolv** - SAT-based dependency resolution
+- **python3-solv** - SAT-based dependency resolution
 - **python3-zstandard** - Decompression of synthesis.hdlist.cz files
 
 ### Firewall ports (for P2P sharing)
