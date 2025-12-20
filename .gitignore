@@ -2,6 +2,18 @@
 essais/
 *.raw
 
+# Debug
+debug*.txt
+.debug*.txt
+.debug*.log
+.urpm*.txt
+.*installed-through-deps.list
+.*removed-as-deps.list
+.missing-packages.txt
+
+# Dev
+.urpm.local
+
 # Python
 __pycache__/
 *.py[cod]
