@@ -31,7 +31,7 @@ def check_dependencies() -> list:
     try:
         import solv
     except ImportError:
-        missing.append(('python3-libsolv', 'dependency resolution'))
+        missing.append(('python3-solv', 'dependency resolution'))
 
     # Check zstandard (required for .cz decompression)
     try:
