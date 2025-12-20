@@ -313,7 +313,11 @@ Attentiion que l'installeur est en perl et que tout recoder en python serait une
   - Téléchargement des paquets depuis les voisines Mageia
   - Accélération drastique des installations en environnement multi-machines
 
-### Phase 6 : Mode Proxy/Relais avancé (P3)
+**Support du boot PXE :**
+  - [ ] choix : Implementation du boot PXE directement par urpmd ou utilisation d'un paquet existant
+  - [ ] utilisation automatique des peers pour l'installation.
+
+### Phase 7 : Mode Proxy/Relais avancé (P3)
 
 Cas d'usage : machine connectée à internet (ex: connexion mobile) + LAN avec
 machines sans accès internet. La machine connectée peut servir de relais.
@@ -349,6 +353,18 @@ Ce qui veut dire que certains medias peuvent être sychronisés par urpmd MAIS p
   - `urpm config proxy-maxqueue N` : taille max de la file d'attente
   - `urpm config proxy-whitelist add/remove/list` : peers autorisés (vide = tous)
 
+
+### Phase 8 : Management de parc
+
+** Inventaire et gestion de parc **
+  - [ ] Detection des peers
+  - [ ] Authentification croisée manager/urpmd(s) => A voir comment... pki ?
+  - [ ] Récolte de configurations
+  - [ ] Inventaire (versions, état de mise à jour)
+  - [ ] déclenchement d'updates plus ou moins durement imposés (pop up dans mgaonline) selon des règles (à déterminer)
+  - [ ] goupes de machines
+  - [ ] installations/désinstallations/upgrades déclenchés sur des machines ou des groupes
+  - [ ] activation/désactivation/ajout/suppression de medias
 
 ### Endpoints futurs (désactivés par défaut)
 
@@ -400,9 +416,9 @@ Cela nécessite :
 
 ### Traductions de l'interface
 Tous les messages de urpm doivent être traduisibles :
-  - Utiliser gettext dans les règles de l'art
-  - Extraire les chaînes traduisibles
-  - Fichiers .po/.mo pour chaque langue
+  - [ ] Utiliser gettext dans les règles de l'art
+  - [ ] Extraire les chaînes traduisibles
+  - [ ] Fichiers .po/.mo pour chaque langue
 
 ### Langues à supporter (au minimum celles de urpmi)
   - Français
