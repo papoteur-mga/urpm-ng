@@ -671,16 +671,20 @@ class Resolver:
             for dep in s.lookup_deparray(solv.SOLVABLE_PROVIDES):
                 cap_str = str(dep)
 
+                # Extract base capability name (remove version constraints like [== 1.0])
+                base_cap = cap_str.split('[')[0].strip() if '[' in cap_str else cap_str
+
                 # Skip if it's the package name itself or already seen
-                if cap_str == s.name or cap_str in seen_caps:
+                if base_cap == s.name or base_cap in seen_caps:
                     continue
 
-                # Skip versioned provides and arch-specific
-                if '[' in cap_str or '(' in cap_str:
+                # Skip arch-specific and perl/python modules
+                if '(' in base_cap:
                     continue
 
-                # Find all providers of this capability
-                providers = self.pool.whatprovides(dep)
+                # Find all providers of this capability (use base name, not versioned dep)
+                base_dep = self.pool.Dep(base_cap)
+                providers = self.pool.whatprovides(base_dep)
 
                 # Skip if capability is already satisfied by an installed package
                 if any(p.repo == self.pool.installed for p in providers):
@@ -691,24 +695,37 @@ class Resolver:
                     if p.repo and p.repo != self.pool.installed:
                         provider_names.add(p.name)
 
+                # DEBUG
+                if 'webinterface' in base_cap.lower():
+                    import sys
+                    print(f"DEBUG: Found {base_cap} with {len(provider_names)} providers: {provider_names}", file=sys.stderr)
+
                 # If multiple different packages provide this, it's an alternative
                 if len(provider_names) > 1:
-                    if not self._is_valid_alternative(cap_str, provider_names, installing):
+                    is_valid = self._is_valid_alternative(base_cap, provider_names, installing)
+                    # DEBUG
+                    if 'webinterface' in base_cap.lower():
+                        print(f"DEBUG: _is_valid_alternative({base_cap}) = {is_valid}", file=sys.stderr)
+                    if not is_valid:
                         continue
 
-                    seen_caps.add(cap_str)
+                    seen_caps.add(base_cap)
 
-                    # Find what requires this capability
-                    required_by = self._find_requirer(cap_str, installing)
-                    if required_by:
-                        sorted_providers = self._prioritize_providers(
-                            list(provider_names), max_providers
-                        )
-                        alternatives.append(Alternative(
-                            capability=cap_str,
-                            required_by=required_by,
-                            providers=sorted_providers
-                        ))
+                    # Find what requires this capability (for display purposes)
+                    required_by = self._find_requirer(base_cap, installing)
+                    # Even if we can't find the requirer, it's still an alternative
+                    # (the package s provides this capability, so something must need it)
+                    if not required_by:
+                        required_by = "dependency"
+
+                    sorted_providers = self._prioritize_providers(
+                        list(provider_names), max_providers
+                    )
+                    alternatives.append(Alternative(
+                        capability=base_cap,
+                        required_by=required_by,
+                        providers=sorted_providers
+                    ))
 
             # APPROACH 2: Check what this package REQUIRES (and RECOMMENDS)
             dep_types = [solv.SOLVABLE_REQUIRES, solv.SOLVABLE_RECOMMENDS]
@@ -719,9 +736,13 @@ class Resolver:
                     if cap_str in seen_caps:
                         continue
 
-                    base_cap = cap_str.split()[0] if ' ' in cap_str else cap_str
+                    # Extract base capability name (remove version constraints like [>= 1.0])
+                    base_cap = cap_str.split('[')[0].split()[0] if '[' in cap_str else (
+                        cap_str.split()[0] if ' ' in cap_str else cap_str
+                    )
 
-                    if '(' in base_cap or '[' in base_cap:
+                    # Skip perl/python modules and other parenthesized deps
+                    if '(' in base_cap:
                         continue
 
                     if base_cap in seen_caps:
@@ -768,10 +789,27 @@ class Resolver:
             return False
 
         # Filter: provider name contains the capability (e.g., lib64digikamcore for digikam-core)
+        # But NOT if providers have different functional suffixes (like php8.5-cgi vs php8.5-cli)
         cap_normalized = capability.replace('-', '').replace('_', '').lower()
-        if any(cap_normalized in p.replace('-', '').replace('_', '').lower()
-               for p in provider_names):
-            return False
+        matching_providers = [p for p in provider_names
+                              if cap_normalized in p.replace('-', '').replace('_', '').lower()]
+        if matching_providers:
+            # Extract functional suffixes (remove digits to ignore version differences)
+            suffixes = set()
+            for p in matching_providers:
+                p_norm = p.replace('-', '').replace('_', '').lower()
+                idx = p_norm.find(cap_normalized)
+                if idx >= 0:
+                    suffix = p_norm[idx + len(cap_normalized):]
+                    # Remove version numbers to get the functional suffix
+                    suffix = ''.join(c for c in suffix if not c.isdigit())
+                    suffixes.add(suffix)
+
+            # If only one suffix pattern (or just version differences), not a real choice
+            # e.g., lib64digikamcore → suffix "" → 1 suffix → exclude
+            # But php8.5-cgi, php8.5-cli → suffixes "cgi", "cli" → 2 suffixes → include
+            if len(suffixes) <= 1:
+                return False
 
         return True
 

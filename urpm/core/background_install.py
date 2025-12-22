@@ -213,11 +213,8 @@ def run_transaction_background(
 ) -> Tuple[bool, str]:
     """Run RPM transaction with background rpmdb sync.
 
-    Forks a child process that:
-    1. Acquires the install lock
-    2. Runs the RPM transaction
-    3. Signals parent when files are installed
-    4. Parent exits, child continues with rpmdb sync
+    DEPRECATED: Use TransactionQueue for new code. This function is kept
+    for backward compatibility and now delegates to TransactionQueue.
 
     Args:
         rpm_paths: List of RPM file paths to install
@@ -230,234 +227,38 @@ def run_transaction_background(
     Returns:
         Tuple of (success, error_message)
     """
-    import rpm
+    from .transaction_queue import TransactionQueue
 
     if not rpm_paths:
         return True, ""
 
-    # Check for previous background errors
-    prev_error = check_background_error()
-    if prev_error:
-        logger.warning(f"Previous background install had an error: {prev_error}")
-        # Don't block - just warn. User can investigate.
-        clear_background_error()
+    queue = TransactionQueue(root=root)
+    queue.add_install(
+        rpm_paths,
+        operation_id="install",
+        verify_signatures=verify_signatures,
+        force=force,
+        test=test
+    )
 
-    # Create pipe for IPC
-    read_fd, write_fd = os.pipe()
+    # Wrap the callback to match the old signature
+    def wrapped_callback(op_id: str, name: str, current: int, total: int):
+        if progress_callback:
+            progress_callback(name, current, total)
 
-    # Fork
-    pid = os.fork()
+    result = queue.execute(progress_callback=wrapped_callback)
 
-    if pid > 0:
-        # Parent process - read progress and display
-        os.close(write_fd)
-        read_file = os.fdopen(read_fd, 'r')
+    if result.operations:
+        op = result.operations[0]
+        if op.success:
+            return True, ""
+        else:
+            return False, "; ".join(op.errors) if op.errors else "Unknown error"
 
-        success = True
-        error_msg = ""
+    if result.overall_error:
+        return False, result.overall_error
 
-        try:
-            for line in read_file:
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    msg = ProgressMessage.from_json(line)
-                except:
-                    continue
-
-                if msg.msg_type == 'progress':
-                    if progress_callback:
-                        progress_callback(msg.name, msg.current, msg.total)
-                elif msg.msg_type == 'done':
-                    # Child signaled that files are installed
-                    # Parent can exit now
-                    break
-                elif msg.msg_type == 'error':
-                    success = False
-                    error_msg = msg.error
-                    break
-                elif msg.msg_type == 'rpmdb':
-                    # Show rpmdb sync message
-                    if progress_callback:
-                        progress_callback("(rpmdb)", msg.current, msg.total)
-        finally:
-            read_file.close()
-
-        return success, error_msg
-
-    else:
-        # Child process - do the actual install
-        os.close(read_fd)
-        write_file = os.fdopen(write_fd, 'w', buffering=1)  # Line buffered
-
-        # Detach from parent's process group (daemonize for rpmdb sync)
-        os.setsid()
-
-        # Acquire install lock
-        lock = InstallLock()
-        try:
-            lock.acquire(blocking=True)
-        except Exception as e:
-            write_file.write(ProgressMessage(
-                msg_type='error',
-                error=f"Failed to acquire lock: {e}"
-            ).to_json() + "\n")
-            write_file.close()
-            os._exit(1)
-
-        try:
-            # Set up RPM transaction
-            ts = rpm.TransactionSet(root)
-
-            if verify_signatures:
-                ts.setVSFlags(0)
-            else:
-                ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)
-
-            # Add packages to transaction
-            headers = []
-            for path in rpm_paths:
-                try:
-                    fd = os.open(str(path), os.O_RDONLY)
-                    try:
-                        hdr = ts.hdrFromFdno(fd)
-                        headers.append((path, hdr))
-                        ts.addInstall(hdr, str(path), 'u')
-                    finally:
-                        os.close(fd)
-                except rpm.error as e:
-                    write_file.write(ProgressMessage(
-                        msg_type='error',
-                        error=f"{path.name}: {e}"
-                    ).to_json() + "\n")
-                    write_file.close()
-                    lock.release()
-                    os._exit(1)
-
-            # Check dependencies
-            if not force:
-                unresolved = ts.check()
-                if unresolved:
-                    errors = [f"Dependency: {prob}" for prob in unresolved]
-                    write_file.write(ProgressMessage(
-                        msg_type='error',
-                        error="; ".join(errors)
-                    ).to_json() + "\n")
-                    write_file.close()
-                    lock.release()
-                    os._exit(1)
-
-            # Order transaction
-            ts.order()
-
-            if test:
-                write_file.write(ProgressMessage(
-                    msg_type='done',
-                    current=len(rpm_paths),
-                    total=len(rpm_paths)
-                ).to_json() + "\n")
-                write_file.close()
-                lock.release()
-                os._exit(0)
-
-            # Set up callback
-            total = len(rpm_paths)
-            current = [0]
-            open_fds = {}
-            files_done = [False]
-
-            def callback(reason, amount, total_pkg, key, client_data):
-                if reason == rpm.RPMCALLBACK_INST_OPEN_FILE:
-                    path = key
-                    current[0] += 1
-
-                    # Send progress to parent (if pipe still open)
-                    if not files_done[0]:
-                        name = Path(path).stem.rsplit('-', 2)[0] if path else ''
-                        write_file.write(ProgressMessage(
-                            msg_type='progress',
-                            name=name,
-                            current=current[0],
-                            total=total
-                        ).to_json() + "\n")
-
-                    fd = os.open(path, os.O_RDONLY)
-                    open_fds[path] = fd
-                    return fd
-
-                elif reason == rpm.RPMCALLBACK_INST_CLOSE_FILE:
-                    path = key
-                    if path in open_fds:
-                        try:
-                            os.close(open_fds[path])
-                        except:
-                            pass
-                        del open_fds[path]
-
-                    # Check if all files are done
-                    if current[0] >= total and not files_done[0]:
-                        files_done[0] = True
-                        # Signal parent that files are installed
-                        write_file.write(ProgressMessage(
-                            msg_type='done',
-                            current=total,
-                            total=total
-                        ).to_json() + "\n")
-                        write_file.flush()
-                        # Close pipe - parent will exit
-                        write_file.close()
-
-                elif reason == rpm.RPMCALLBACK_TRANS_STOP:
-                    # Transaction complete (after rpmdb sync)
-                    _log_background(f"Transaction complete: {total} packages installed")
-
-            # Set problem filters
-            prob_filter = 0
-            if force:
-                prob_filter |= (
-                    rpm.RPMPROB_FILTER_REPLACEPKG |
-                    rpm.RPMPROB_FILTER_OLDPACKAGE |
-                    rpm.RPMPROB_FILTER_REPLACENEWFILES |
-                    rpm.RPMPROB_FILTER_REPLACEOLDFILES
-                )
-            if prob_filter:
-                ts.setProbFilter(prob_filter)
-
-            # Run transaction
-            _log_background(f"Starting transaction: {total} packages")
-            problems = ts.run(callback, '')
-
-            # Clean up any remaining FDs
-            for fd in open_fds.values():
-                try:
-                    os.close(fd)
-                except:
-                    pass
-
-            if problems:
-                error = "; ".join(str(p) for p in problems)
-                _set_background_error(f"Transaction failed: {error}")
-                lock.release()
-                os._exit(1)
-
-            _log_background("Transaction completed successfully")
-            lock.release()
-            os._exit(0)
-
-        except Exception as e:
-            _set_background_error(f"Unexpected error: {e}")
-            try:
-                write_file.write(ProgressMessage(
-                    msg_type='error',
-                    error=str(e)
-                ).to_json() + "\n")
-                write_file.close()
-            except:
-                pass
-            lock.release()
-            os._exit(1)
+    return result.success, ""
 
 
 def run_erase_background(
@@ -469,7 +270,8 @@ def run_erase_background(
 ) -> Tuple[bool, str]:
     """Run RPM erase transaction with background rpmdb sync.
 
-    Same architecture as run_transaction_background but for erasing.
+    DEPRECATED: Use TransactionQueue for new code. This function is kept
+    for backward compatibility and now delegates to TransactionQueue.
 
     Args:
         package_names: List of package names to erase
@@ -481,176 +283,34 @@ def run_erase_background(
     Returns:
         Tuple of (success, error_message)
     """
-    import rpm
+    from .transaction_queue import TransactionQueue
 
     if not package_names:
         return True, ""
 
-    # Check for previous background errors
-    prev_error = check_background_error()
-    if prev_error:
-        logger.warning(f"Previous background operation had an error: {prev_error}")
-        clear_background_error()
+    queue = TransactionQueue(root=root)
+    queue.add_erase(
+        package_names,
+        operation_id="erase",
+        force=force,
+        test=test
+    )
 
-    # Create pipe for IPC
-    read_fd, write_fd = os.pipe()
+    # Wrap the callback to match the old signature
+    def wrapped_callback(op_id: str, name: str, current: int, total: int):
+        if progress_callback:
+            progress_callback(name, current, total)
 
-    # Fork
-    pid = os.fork()
+    result = queue.execute(progress_callback=wrapped_callback)
 
-    if pid > 0:
-        # Parent process
-        os.close(write_fd)
-        read_file = os.fdopen(read_fd, 'r')
+    if result.operations:
+        op = result.operations[0]
+        if op.success:
+            return True, ""
+        else:
+            return False, "; ".join(op.errors) if op.errors else "Unknown error"
 
-        success = True
-        error_msg = ""
+    if result.overall_error:
+        return False, result.overall_error
 
-        try:
-            for line in read_file:
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    msg = ProgressMessage.from_json(line)
-                except:
-                    continue
-
-                if msg.msg_type == 'progress':
-                    if progress_callback:
-                        progress_callback(msg.name, msg.current, msg.total)
-                elif msg.msg_type == 'done':
-                    break
-                elif msg.msg_type == 'error':
-                    success = False
-                    error_msg = msg.error
-                    break
-        finally:
-            read_file.close()
-
-        return success, error_msg
-
-    else:
-        # Child process
-        os.close(read_fd)
-        write_file = os.fdopen(write_fd, 'w', buffering=1)
-
-        os.setsid()
-
-        lock = InstallLock()
-        try:
-            lock.acquire(blocking=True)
-        except Exception as e:
-            write_file.write(ProgressMessage(
-                msg_type='error',
-                error=f"Failed to acquire lock: {e}"
-            ).to_json() + "\n")
-            write_file.close()
-            os._exit(1)
-
-        try:
-            ts = rpm.TransactionSet(root)
-            ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)
-
-            # Find installed packages
-            found = []
-            for name in package_names:
-                mi = ts.dbMatch('name', name)
-                for hdr in mi:
-                    found.append((name, hdr))
-                    ts.addErase(hdr)
-                    break  # Only first match
-
-            if not found:
-                write_file.write(ProgressMessage(
-                    msg_type='error',
-                    error="No packages found to erase"
-                ).to_json() + "\n")
-                write_file.close()
-                lock.release()
-                os._exit(1)
-
-            # Check dependencies
-            if not force:
-                unresolved = ts.check()
-                if unresolved:
-                    errors = [f"Dependency: {prob}" for prob in unresolved]
-                    write_file.write(ProgressMessage(
-                        msg_type='error',
-                        error="; ".join(errors)
-                    ).to_json() + "\n")
-                    write_file.close()
-                    lock.release()
-                    os._exit(1)
-
-            ts.order()
-
-            if test:
-                write_file.write(ProgressMessage(
-                    msg_type='done',
-                    current=len(found),
-                    total=len(found)
-                ).to_json() + "\n")
-                write_file.close()
-                lock.release()
-                os._exit(0)
-
-            # Callback
-            total = len(found)
-            current = [0]
-            erase_done = [False]
-
-            def callback(reason, amount, total_pkg, key, client_data):
-                if reason == rpm.RPMCALLBACK_UNINST_START:
-                    current[0] += 1
-                    name = key if isinstance(key, str) else str(key)
-                    write_file.write(ProgressMessage(
-                        msg_type='progress',
-                        name=name,
-                        current=current[0],
-                        total=total
-                    ).to_json() + "\n")
-
-                elif reason == rpm.RPMCALLBACK_UNINST_STOP:
-                    if current[0] >= total and not erase_done[0]:
-                        erase_done[0] = True
-                        write_file.write(ProgressMessage(
-                            msg_type='done',
-                            current=total,
-                            total=total
-                        ).to_json() + "\n")
-                        write_file.flush()
-                        write_file.close()
-
-                elif reason == rpm.RPMCALLBACK_TRANS_STOP:
-                    _log_background(f"Erase complete: {total} packages removed")
-
-            if force:
-                ts.setProbFilter(rpm.RPMPROB_FILTER_REPLACEPKG)
-
-            _log_background(f"Starting erase: {total} packages")
-            problems = ts.run(callback, '')
-
-            if problems:
-                error = "; ".join(str(p) for p in problems)
-                _set_background_error(f"Erase failed: {error}")
-                lock.release()
-                os._exit(1)
-
-            _log_background("Erase completed successfully")
-            lock.release()
-            os._exit(0)
-
-        except Exception as e:
-            _set_background_error(f"Unexpected error: {e}")
-            try:
-                write_file.write(ProgressMessage(
-                    msg_type='error',
-                    error=str(e)
-                ).to_json() + "\n")
-                write_file.close()
-            except:
-                pass
-            lock.release()
-            os._exit(1)
+    return result.success, ""

@@ -1981,9 +1981,10 @@ def cmd_install(args, db: PackageDatabase) -> int:
     from ..core.resolver import Resolver, Resolution, format_size
     from ..core.download import Downloader, DownloadItem
     from ..core.background_install import (
-        run_transaction_background, check_background_error, clear_background_error,
+        check_background_error, clear_background_error,
         InstallLock
     )
+    from ..core.transaction_queue import TransactionQueue
     from . import colors
 
     # Check for previous background install errors
@@ -2391,35 +2392,40 @@ def cmd_install(args, db: PackageDatabase) -> int:
 
     last_shown = [None]
 
-    def install_progress(name, current, total):
-        if name == '(rpmdb)':
-            # rpmdb sync happening in background - don't show anything special
-            pass
-        elif last_shown[0] != name:
-            print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
-            last_shown[0] = name
-
     try:
         verify_sigs = not getattr(args, 'nosignature', False)
         force = getattr(args, 'force', False)
         test_mode = getattr(args, 'test', False)
 
-        # Use background install - parent returns when files are installed,
-        # rpmdb sync continues in background
-        success, error_msg = run_transaction_background(
+        # Build transaction queue
+        queue = TransactionQueue()
+        queue.add_install(
             rpm_paths,
-            progress_callback=install_progress,
+            operation_id="install",
             verify_signatures=verify_sigs,
             force=force,
             test=test_mode
         )
 
+        # Progress callback
+        def queue_progress(op_id: str, name: str, current: int, total: int):
+            if last_shown[0] != name:
+                print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
+                last_shown[0] = name
+
+        # Execute the queue
+        queue_result = queue.execute(progress_callback=queue_progress)
+
         # Print done
         print(f"\r\033[K  [{len(rpm_paths)}/{len(rpm_paths)}] done")
 
-        if not success:
+        if not queue_result.success:
             print(colors.error(f"\nInstallation failed:"))
-            print(f"  {colors.error(error_msg)}")
+            if queue_result.operations:
+                for err in queue_result.operations[0].errors[:3]:
+                    print(f"  {colors.error(err)}")
+            elif queue_result.overall_error:
+                print(f"  {colors.error(queue_result.overall_error)}")
             db.abort_transaction(transaction_id)
             return 1
 
@@ -2428,7 +2434,8 @@ def cmd_install(args, db: PackageDatabase) -> int:
             db.abort_transaction(transaction_id)
             return 130
 
-        print(colors.success(f"  {len(rpm_paths)} packages installed"))
+        installed_count = queue_result.operations[0].count if queue_result.operations else len(rpm_paths)
+        print(colors.success(f"  {installed_count} packages installed"))
         db.complete_transaction(transaction_id)
 
         # Update installed-through-deps.list for urpmi compatibility
@@ -2464,9 +2471,10 @@ def cmd_erase(args, db: PackageDatabase) -> int:
     from ..core.resolver import Resolver, format_size
     from ..core.install import check_root
     from ..core.background_install import (
-        run_erase_background, check_background_error, clear_background_error,
+        check_background_error, clear_background_error,
         InstallLock
     )
+    from ..core.transaction_queue import TransactionQueue
     from . import colors
 
     # Check for previous background errors
@@ -2647,14 +2655,6 @@ def cmd_erase(args, db: PackageDatabase) -> int:
 
     last_erase_shown = [None]
 
-    def erase_progress(name, current, total):
-        if name == '(rpmdb)':
-            # rpmdb sync happening in background - don't show
-            pass
-        elif last_erase_shown[0] != name:
-            print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
-            last_erase_shown[0] = name
-
     try:
         # Record packages being erased (with correct reason)
         for action in all_actions:
@@ -2670,21 +2670,34 @@ def cmd_erase(args, db: PackageDatabase) -> int:
         force = getattr(args, 'force', False)
         test_mode = getattr(args, 'test', False)
 
-        # Use background erase - parent returns when packages are removed,
-        # rpmdb sync continues in background
-        success, error_msg = run_erase_background(
+        # Build transaction queue
+        queue = TransactionQueue()
+        queue.add_erase(
             packages_to_erase,
-            progress_callback=erase_progress,
+            operation_id="erase",
             force=force,
             test=test_mode
         )
 
+        # Progress callback
+        def queue_progress(op_id: str, name: str, current: int, total: int):
+            if last_erase_shown[0] != name:
+                print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
+                last_erase_shown[0] = name
+
+        # Execute the queue
+        queue_result = queue.execute(progress_callback=queue_progress)
+
         # Print done
         print(f"\r\033[K  [{len(packages_to_erase)}/{len(packages_to_erase)}] done")
 
-        if not success:
+        if not queue_result.success:
             print(colors.error(f"\nErase failed:"))
-            print(f"  {colors.error(error_msg)}")
+            if queue_result.operations:
+                for err in queue_result.operations[0].errors[:3]:
+                    print(f"  {colors.error(err)}")
+            elif queue_result.overall_error:
+                print(f"  {colors.error(queue_result.overall_error)}")
             if not force:
                 print(colors.dim("  Use --force to ignore dependency problems"))
             db.abort_transaction(transaction_id)
@@ -2695,7 +2708,8 @@ def cmd_erase(args, db: PackageDatabase) -> int:
             db.abort_transaction(transaction_id)
             return 130
 
-        print(colors.success(f"  {len(packages_to_erase)} packages erased"))
+        erased_count = queue_result.operations[0].count if queue_result.operations else len(packages_to_erase)
+        print(colors.success(f"  {erased_count} packages erased"))
         db.complete_transaction(transaction_id)
 
         # Update installed-through-deps.list for urpmi compatibility
@@ -2726,9 +2740,10 @@ def cmd_update(args, db: PackageDatabase) -> int:
 
     from . import colors
     from ..core.background_install import (
-        run_transaction_background, check_background_error, clear_background_error,
+        check_background_error, clear_background_error,
         InstallLock
     )
+    from ..core.transaction_queue import TransactionQueue
 
     # Check for previous background install errors
     prev_error = check_background_error()
@@ -2999,80 +3014,104 @@ def cmd_update(args, db: PackageDatabase) -> int:
     signal.signal(signal.SIGINT, sigint_handler)
 
     try:
+        # Build transaction queue with all operations
+        queue = TransactionQueue()
+
+        verify_sigs = not getattr(args, 'nosignature', False)
+        force = getattr(args, 'force', False)
+        test_mode = getattr(args, 'test', False)
+
         if rpm_paths:
-            print(f"\nUpgrading {len(rpm_paths)} packages...")
-            # Check if another install is in progress
-            lock = InstallLock()
-            if not lock.acquire(blocking=False):
-                print(colors.warning("  RPM database is locked by another process."))
-                print(colors.dim("  Waiting for lock... (Ctrl+C to cancel)"))
-                lock.acquire(blocking=True)
-            lock.release()  # Release - child will acquire its own lock
-
-            last_shown = [None]
-
-            def install_progress(name, current, total):
-                if name == '(rpmdb)':
-                    # rpmdb sync happening in background - don't show
-                    pass
-                elif last_shown[0] != name:
-                    print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
-                    last_shown[0] = name
-
-            verify_sigs = not getattr(args, 'nosignature', False)
-            force = getattr(args, 'force', False)
-            test_mode = getattr(args, 'test', False)
-
-            # Use background install - parent returns when files are installed,
-            # rpmdb sync continues in background
-            success, error_msg = run_transaction_background(
+            queue.add_install(
                 rpm_paths,
-                progress_callback=install_progress,
+                operation_id="upgrade",
                 verify_signatures=verify_sigs,
                 force=force,
                 test=test_mode
             )
 
-            # Print done
-            print(f"\r\033[K  [{len(rpm_paths)}/{len(rpm_paths)}] done")
-
-            if not success:
-                print(colors.error(f"\nUpgrade failed:"))
-                print(f"  {colors.error(error_msg)}")
-                db.abort_transaction(transaction_id)
-                return 1
-
-            if interrupted[0]:
-                print(colors.warning(f"\n  Upgrade interrupted"))
-                db.abort_transaction(transaction_id)
-                return 130
-
-            print(colors.success(f"  {len(rpm_paths)} packages upgraded"))
-
-        # Remove orphaned dependencies
-        if orphans and not interrupted[0]:
-            print(f"\nRemoving {colors.warning(str(len(orphans)))} orphaned dependencies...")
+        orphan_names = []
+        if orphans:
             orphan_names = [a.name for a in orphans]
+            queue.add_erase(
+                orphan_names,
+                operation_id="orphan_cleanup",
+                force=force,
+                test=test_mode,
+                background=True  # Don't wait - runs after rpmdb sync
+            )
 
-            orphan_installer = Installer()
-            erase_result = orphan_installer.erase_batched(orphan_names)
-            if erase_result.success:
-                print(colors.success(f"  {erase_result.removed} packages removed"))
-                # Record orphan removals in transaction
-                for a in orphans:
-                    db.record_package(
-                        transaction_id,
-                        a.nevra,
-                        a.name,
-                        'remove',
-                        'orphan'
-                    )
-                # Unmark from installed-through-deps.list
-                resolver.unmark_packages(orphan_names)
-            else:
-                print(colors.warning(f"  Warning: failed to remove some orphans"))
-                for err in erase_result.errors[:3]:
-                    print(f"    {colors.warning(err)}")
+        if queue.is_empty():
+            db.complete_transaction(transaction_id)
+            return 0
+
+        # Check if another install is in progress
+        lock = InstallLock()
+        if not lock.acquire(blocking=False):
+            print(colors.warning("  RPM database is locked by another process."))
+            print(colors.dim("  Waiting for lock... (Ctrl+C to cancel)"))
+            lock.acquire(blocking=True)
+        lock.release()  # Release - child will acquire its own lock
+
+        # Progress tracking
+        last_shown = [None]
+        current_phase = [""]
+
+        def queue_progress(op_id: str, name: str, current: int, total: int):
+            if current_phase[0] != op_id:
+                # New phase starting
+                current_phase[0] = op_id
+                if op_id == "upgrade":
+                    print(f"\nUpgrading {total} packages...")
+                # Note: orphan_cleanup runs in background, no progress display
+                last_shown[0] = None
+
+            if last_shown[0] != name:
+                print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
+                last_shown[0] = name
+
+        # Execute the queue - all operations run sequentially in one process
+        queue_result = queue.execute(progress_callback=queue_progress)
+
+        # Clear the line after last progress
+        print(f"\r\033[K", end='')
+
+        if interrupted[0]:
+            print(colors.warning(f"\n  Operation interrupted"))
+            db.abort_transaction(transaction_id)
+            return 130
+
+        # Process results for each operation
+        upgrade_success = True
+
+        for op_result in queue_result.operations:
+            if op_result.operation_id == "upgrade":
+                if op_result.success:
+                    print(colors.success(f"  {op_result.count} packages upgraded"))
+                else:
+                    upgrade_success = False
+                    print(colors.error(f"\nUpgrade failed:"))
+                    for err in op_result.errors[:3]:
+                        print(f"  {colors.error(err)}")
+
+        # Orphan cleanup runs in background - just display status
+        if orphan_names:
+            print(colors.dim(f"  {len(orphan_names)} orphaned packages being removed in background..."))
+            # Record orphan removals now (will complete in background)
+            for a in orphans:
+                db.record_package(
+                    transaction_id,
+                    a.nevra,
+                    a.name,
+                    'remove',
+                    'orphan'
+                )
+            # Unmark from installed-through-deps.list
+            resolver.unmark_packages(orphan_names)
+
+        if not upgrade_success:
+            db.abort_transaction(transaction_id)
+            return 1
 
         db.complete_transaction(transaction_id)
 
@@ -3089,7 +3128,6 @@ def cmd_update(args, db: PackageDatabase) -> int:
             resolver.unmark_packages(removed)
 
         # Debug: write orphans that were removed
-        orphan_names = [o.name for o in orphans]
         if orphan_names:
             _write_debug_file(DEBUG_LAST_REMOVED_DEPS, orphan_names)
 
@@ -3569,9 +3607,10 @@ def cmd_autoremove(args, db: PackageDatabase) -> int:
     from ..core.resolver import Resolver, format_size
     from ..core.install import check_root
     from ..core.background_install import (
-        run_erase_background, check_background_error, clear_background_error,
+        check_background_error, clear_background_error,
         InstallLock
     )
+    from ..core.transaction_queue import TransactionQueue
 
     # Check for previous background errors
     prev_error = check_background_error()
@@ -3781,28 +3820,29 @@ def cmd_autoremove(args, db: PackageDatabase) -> int:
 
         last_erase_shown = [None]
 
-        def erase_progress(name, current, total):
-            if name == '(rpmdb)':
-                if last_erase_shown[0] != '(rpmdb)' and last_erase_shown[0] is not None:
-                    print(f" [Waiting for RPM database...]", end='', flush=True)
-                    last_erase_shown[0] = '(rpmdb)'
-            elif last_erase_shown[0] != name:
+        # Build transaction queue
+        queue = TransactionQueue()
+        queue.add_erase(package_names, operation_id="autoremove")
+
+        # Progress callback
+        def queue_progress(op_id: str, name: str, current: int, total: int):
+            if last_erase_shown[0] != name:
                 print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
                 last_erase_shown[0] = name
 
-        # Use background erase - parent returns when packages are removed,
-        # rpmdb sync continues in background
-        success, error_msg = run_erase_background(
-            package_names,
-            progress_callback=erase_progress
-        )
+        # Execute the queue
+        queue_result = queue.execute(progress_callback=queue_progress)
 
         # Print done
         print(f"\r\033[K  [{len(package_names)}/{len(package_names)}] done")
 
-        if not success:
+        if not queue_result.success:
             print(colors.error(f"\nRemoval failed:"))
-            print(f"  {colors.error(error_msg)}")
+            if queue_result.operations:
+                for err in queue_result.operations[0].errors[:3]:
+                    print(f"  {colors.error(err)}")
+            elif queue_result.overall_error:
+                print(f"  {colors.error(queue_result.overall_error)}")
             db.abort_transaction(transaction_id)
             return 1
 
@@ -3811,7 +3851,8 @@ def cmd_autoremove(args, db: PackageDatabase) -> int:
             db.abort_transaction(transaction_id)
             return 130
 
-        print(colors.success(f"  {len(package_names)} packages removed"))
+        removed_count = queue_result.operations[0].count if queue_result.operations else len(package_names)
+        print(colors.success(f"  {removed_count} packages removed"))
 
         # Mark faildeps transactions as cleaned
         if faildeps_trans_ids:
@@ -4566,8 +4607,10 @@ def cmd_undo(args, db: PackageDatabase) -> int:
     """Handle undo command - undo last or specific transaction."""
     import signal
     import platform
-    from ..core.install import Installer, check_root
+    from ..core.install import check_root
     from ..core.resolver import Resolver
+    from ..core.transaction_queue import TransactionQueue
+    from ..core.background_install import InstallLock
     from . import colors
 
     # Check root
@@ -4667,47 +4710,58 @@ def cmd_undo(args, db: PackageDatabase) -> int:
     undo_trans_id = db.begin_transaction('undo', f'urpm undo {target_id}')
 
     try:
-        installer = Installer()
-
         # First remove packages that were installed (all at once for dependency handling)
         if to_remove and not interrupted:
+            # Check if another operation is in progress
+            lock = InstallLock()
+            if not lock.acquire(blocking=False):
+                print(colors.warning("  RPM database is locked by another process."))
+                print(colors.dim("  Waiting for lock... (Ctrl+C to cancel)"))
+                lock.acquire(blocking=True)
+            lock.release()  # Release - child will acquire its own lock
+
             print(colors.info(f"\nRemoving {len(to_remove)} package(s)..."))
 
             last_erase_shown = [None]
 
-            def erase_progress(name, current, total):
-                if name == '(updating rpmdb)' or name.startswith('(rpmdb '):
-                    if last_erase_shown[0] != '(rpmdb)' and last_erase_shown[0] is not None:
-                        print(f" [Waiting for RPM database...]", end='', flush=True)
-                        last_erase_shown[0] = '(rpmdb)'  # Normalize all rpmdb names
-                elif last_erase_shown[0] != name:
+            # Build transaction queue
+            queue = TransactionQueue()
+            queue.add_erase(to_remove, operation_id="undo_remove")
+
+            # Progress callback
+            def queue_progress(op_id: str, name: str, current: int, total: int):
+                if last_erase_shown[0] != name:
                     print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
                     last_erase_shown[0] = name
 
-            result = installer.erase_batched(to_remove, progress_callback=erase_progress)
-            # Print clean "done" line if we ended on rpmdb update, otherwise just newline
-            if last_erase_shown[0] == '(rpmdb)':
-                print(f"\r\033[K  [{len(to_remove)}/{len(to_remove)}] done")
-            else:
-                print()
+            # Execute the queue
+            queue_result = queue.execute(progress_callback=queue_progress)
 
-            if not result.success:
+            # Print done
+            print(f"\r\033[K  [{len(to_remove)}/{len(to_remove)}] done")
+
+            if not queue_result.success:
                 print(colors.error("\nErase failed:"))
-                for err in result.errors[:10]:
-                    print(f"  {colors.error(err)}")
+                if queue_result.operations:
+                    for err in queue_result.operations[0].errors[:10]:
+                        print(f"  {colors.error(err)}")
+                elif queue_result.overall_error:
+                    print(f"  {colors.error(queue_result.overall_error)}")
                 db.abort_transaction(undo_trans_id)
                 return 1
 
             if interrupted:
+                erased_count = queue_result.operations[0].count if queue_result.operations else 0
                 db.abort_transaction(undo_trans_id)
-                print(colors.warning(f"\nUndo interrupted after {result.erased} packages"))
+                print(colors.warning(f"\nUndo interrupted after {erased_count} packages"))
                 return 130
 
             # Record removed packages
             for name in to_remove:
                 db.record_package(undo_trans_id, name, name, 'remove', 'explicit')
 
-            print(colors.success(f"  {result.erased} packages removed"))
+            erased_count = queue_result.operations[0].count if queue_result.operations else len(to_remove)
+            print(colors.success(f"  {erased_count} packages removed"))
 
         # Then reinstall packages that were removed
         if to_install and not interrupted:
@@ -4786,8 +4840,10 @@ def cmd_rollback(args, db: PackageDatabase) -> int:
     """
     import signal
     import platform
-    from ..core.install import Installer, check_root
+    from ..core.install import check_root
     from ..core.resolver import Resolver
+    from ..core.transaction_queue import TransactionQueue
+    from ..core.background_install import InstallLock
     from . import colors
 
     # Check root
@@ -4958,47 +5014,58 @@ def cmd_rollback(args, db: PackageDatabase) -> int:
     trans_id = db.begin_transaction('rollback', f'urpm rollback {" ".join(map(str, rollback_args)) or "1"}')
 
     try:
-        installer = Installer()
-
         # First remove packages that were installed (all at once for dependency handling)
         if to_remove and not interrupted:
+            # Check if another operation is in progress
+            lock = InstallLock()
+            if not lock.acquire(blocking=False):
+                print(colors.warning("  RPM database is locked by another process."))
+                print(colors.dim("  Waiting for lock... (Ctrl+C to cancel)"))
+                lock.acquire(blocking=True)
+            lock.release()  # Release - child will acquire its own lock
+
             print(colors.info(f"\nRemoving {len(to_remove)} package(s)..."))
 
             last_erase_shown = [None]
 
-            def erase_progress(name, current, total):
-                if name == '(updating rpmdb)' or name.startswith('(rpmdb '):
-                    if last_erase_shown[0] != '(rpmdb)' and last_erase_shown[0] is not None:
-                        print(f" [Waiting for RPM database...]", end='', flush=True)
-                        last_erase_shown[0] = '(rpmdb)'  # Normalize all rpmdb names
-                elif last_erase_shown[0] != name:
+            # Build transaction queue
+            queue = TransactionQueue()
+            queue.add_erase(to_remove, operation_id="rollback_remove")
+
+            # Progress callback
+            def queue_progress(op_id: str, name: str, current: int, total: int):
+                if last_erase_shown[0] != name:
                     print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
                     last_erase_shown[0] = name
 
-            result = installer.erase_batched(to_remove, progress_callback=erase_progress)
-            # Print clean "done" line if we ended on rpmdb update, otherwise just newline
-            if last_erase_shown[0] == '(rpmdb)':
-                print(f"\r\033[K  [{len(to_remove)}/{len(to_remove)}] done")
-            else:
-                print()
+            # Execute the queue
+            queue_result = queue.execute(progress_callback=queue_progress)
 
-            if not result.success:
+            # Print done
+            print(f"\r\033[K  [{len(to_remove)}/{len(to_remove)}] done")
+
+            if not queue_result.success:
                 print(colors.error("\nErase failed:"))
-                for err in result.errors[:10]:
-                    print(f"  {colors.error(err)}")
+                if queue_result.operations:
+                    for err in queue_result.operations[0].errors[:10]:
+                        print(f"  {colors.error(err)}")
+                elif queue_result.overall_error:
+                    print(f"  {colors.error(queue_result.overall_error)}")
                 db.abort_transaction(trans_id)
                 return 1
 
             if interrupted:
+                erased_count = queue_result.operations[0].count if queue_result.operations else 0
                 db.abort_transaction(trans_id)
-                print(colors.warning(f"\nRollback interrupted after {result.erased} packages"))
+                print(colors.warning(f"\nRollback interrupted after {erased_count} packages"))
                 return 130
 
             # Record removed packages
             for name in to_remove:
                 db.record_package(trans_id, name, name, 'remove', 'explicit')
 
-            print(colors.success(f"  {result.erased} packages removed"))
+            erased_count = queue_result.operations[0].count if queue_result.operations else len(to_remove)
+            print(colors.success(f"  {erased_count} packages removed"))
 
         # Then reinstall packages that were removed
         if to_install and not interrupted:
@@ -5042,8 +5109,11 @@ def cmd_cleandeps(args, db: PackageDatabase) -> int:
     """Handle cleandeps command - remove orphan deps from interrupted transactions."""
     import signal
     import platform
-    from ..core.install import Installer, check_root
+    from ..core.install import check_root
     from ..core.resolver import Resolver
+    from ..core.transaction_queue import TransactionQueue
+    from ..core.background_install import InstallLock
+    from . import colors
 
     interrupted = db.get_interrupted_transactions()
 
@@ -5124,41 +5194,53 @@ def cmd_cleandeps(args, db: PackageDatabase) -> int:
             # Record in transaction
             db.record_package(transaction_id, nevra, name, 'remove', 'cleandeps')
 
+        # Check if another operation is in progress
+        lock = InstallLock()
+        if not lock.acquire(blocking=False):
+            print(colors.warning("  RPM database is locked by another process."))
+            print(colors.dim("  Waiting for lock... (Ctrl+C to cancel)"))
+            lock.acquire(blocking=True)
+        lock.release()  # Release - child will acquire its own lock
+
         # Erase packages
         print(f"\nErasing {len(packages_to_erase)} orphan dependencies...")
-        installer = Installer()
 
         last_erase_shown = [None]
 
-        def erase_progress(name, current, total):
-            if name == '(updating rpmdb)' or name.startswith('(rpmdb '):
-                if last_erase_shown[0] != '(rpmdb)' and last_erase_shown[0] is not None:
-                    print(f" [Waiting for RPM database...]", end='', flush=True)
-                    last_erase_shown[0] = '(rpmdb)'  # Normalize all rpmdb names
-            elif last_erase_shown[0] != name:
+        # Build transaction queue
+        queue = TransactionQueue()
+        queue.add_erase(packages_to_erase, operation_id="cleandeps")
+
+        # Progress callback
+        def queue_progress(op_id: str, name: str, current: int, total: int):
+            if last_erase_shown[0] != name:
                 print(f"\r\033[K  [{current}/{total}] {name}", end='', flush=True)
                 last_erase_shown[0] = name
 
-        erase_result = installer.erase_batched(packages_to_erase, progress_callback=erase_progress)
-        # Print clean "done" line if we ended on rpmdb update, otherwise just newline
-        if last_erase_shown[0] == '(rpmdb)':
-            print(f"\r\033[K  [{len(packages_to_erase)}/{len(packages_to_erase)}] done")
-        else:
-            print()
+        # Execute the queue
+        queue_result = queue.execute(progress_callback=queue_progress)
 
-        if not erase_result.success:
-            print(f"\nErase failed:")
-            for err in erase_result.errors[:5]:
-                print(f"  {err}")
+        # Print done
+        print(f"\r\033[K  [{len(packages_to_erase)}/{len(packages_to_erase)}] done")
+
+        if not queue_result.success:
+            print(colors.error(f"\nErase failed:"))
+            if queue_result.operations:
+                for err in queue_result.operations[0].errors[:5]:
+                    print(f"  {colors.error(err)}")
+            elif queue_result.overall_error:
+                print(f"  {colors.error(queue_result.overall_error)}")
             db.abort_transaction(transaction_id)
             return 1
 
         if interrupted_flag[0]:
-            print(f"\n  Erase interrupted after {erase_result.erased} packages")
+            erased_count = queue_result.operations[0].count if queue_result.operations else 0
+            print(colors.warning(f"\n  Erase interrupted after {erased_count} packages"))
             db.abort_transaction(transaction_id)
             return 130
 
-        print(f"  {erase_result.erased} packages erased")
+        erased_count = queue_result.operations[0].count if queue_result.operations else len(packages_to_erase)
+        print(colors.success(f"  {erased_count} packages erased"))
 
         # Mark interrupted transactions as cleaned
         for tid in interrupted_ids:
