@@ -618,13 +618,15 @@ class Resolver:
         }
 
     def resolve_install(self, package_names: List[str],
-                        choices: Dict[str, str] = None) -> Resolution:
+                        choices: Dict[str, str] = None,
+                        favored_packages: set = None) -> Resolution:
         """Resolve packages to install.
 
         Args:
             package_names: List of package names to install
             choices: Optional dict mapping capability -> chosen package name
                      for resolving alternatives (e.g., {"task-sound": "task-pulseaudio"})
+            favored_packages: Optional set of package names to favor (from preferences)
 
         Returns:
             Resolution with success status and package actions.
@@ -632,46 +634,73 @@ class Resolver:
         """
         if choices is None:
             choices = {}
+        if favored_packages is None:
+            favored_packages = set()
 
-        self._solvable_to_pkg = {}
-        self.pool = self._create_pool()
+        # Reuse existing pool if available, otherwise create new one
+        if self.pool is None:
+            self._solvable_to_pkg = {}
+            self.pool = self._create_pool()
 
         jobs = []
         not_found = []
 
-        # Add explicit choices first (higher priority)
+        # Process choices FIRST to identify alternatives that shouldn't be favored
         favored = set()
+        disfavored = set()
+        chosen_packages = set(choices.values())
+
+        # For each choice, DISFAVOR alternatives (packages providing same capability)
         for cap, pkg_name in choices.items():
-            if pkg_name in favored:
+            chosen_packages.add(pkg_name)
+            cap_dep = self.pool.Dep(cap)
+            if cap_dep:
+                for provider in self.pool.whatprovides(cap_dep):
+                    if provider.repo and provider.repo.name != '@System':
+                        if provider.name != pkg_name:
+                            disfavored.add(provider.name)
+
+        # Add favored packages - but SKIP those that are alternatives to choices
+        favored_provides = {}  # {capability: favored_pkg_name}
+        for pkg_name in favored_packages:
+            if pkg_name in favored or pkg_name in disfavored:
                 continue
             favored.add(pkg_name)
             sel = self.pool.select(pkg_name, solv.Selection.SELECTION_NAME)
             if not sel.isempty():
-                # INSTALL forces inclusion, FAVOR affects ordering
-                jobs += sel.jobs(solv.Job.SOLVER_INSTALL | solv.Job.SOLVER_WEAK)
                 jobs += sel.jobs(solv.Job.SOLVER_FAVOR)
+                # Collect what this package provides
+                for s in sel.solvables():
+                    if s.repo and s.repo.name != '@System':
+                        for dep in s.lookup_deparray(solv.SOLVABLE_PROVIDES):
+                            cap = str(dep).split()[0]
+                            if not cap.startswith(('rpmlib(', '/', 'lib', 'pkgconfig(')):
+                                favored_provides[cap] = pkg_name
+                        break
 
-        # Exclude alternatives for functionally relevant capabilities (soft exclusion)
-        excluded = set()
-        for cap, pkg_name in choices.items():
-            # Skip technical/auto-generated capabilities
-            if '(' in cap or cap.startswith(('lib', '/')):
-                continue
-
-            # Check if this capability has multiple providers (real alternative)
+        # DISFAVOR packages that provide the same capabilities but aren't favored
+        for cap, favored_pkg in favored_provides.items():
             cap_dep = self.pool.Dep(cap)
-            providers = [p for p in self.pool.whatprovides(cap_dep)
-                        if p.repo and p.repo != self.pool.installed]
-            if len(providers) <= 1:
-                continue  # No alternatives to exclude
+            if cap_dep:
+                for provider in self.pool.whatprovides(cap_dep):
+                    if provider.repo and provider.repo.name != '@System':
+                        if provider.name not in favored and provider.name not in disfavored:
+                            disfavored.add(provider.name)
 
-            # Soft-exclude other providers (ERASE | WEAK = try not to install)
-            for p in providers:
-                if p.name != pkg_name and p.name not in excluded and p.name not in favored:
-                    excluded.add(p.name)
-                    exclude_sel = self.pool.select(p.name, solv.Selection.SELECTION_NAME)
-                    if not exclude_sel.isempty():
-                        jobs += exclude_sel.jobs(solv.Job.SOLVER_ERASE | solv.Job.SOLVER_WEAK)
+        # Apply DISFAVOR jobs for all disfavored packages
+        for pkg_name in disfavored:
+            dis_sel = self.pool.select(pkg_name, solv.Selection.SELECTION_NAME)
+            if not dis_sel.isempty():
+                jobs += dis_sel.jobs(solv.Job.SOLVER_DISFAVOR)
+
+        # Add explicit choices with INSTALL job
+        for cap, pkg_name in choices.items():
+            sel = self.pool.select(pkg_name, solv.Selection.SELECTION_NAME)
+            if not sel.isempty():
+                jobs += sel.jobs(solv.Job.SOLVER_INSTALL | solv.Job.SOLVER_WEAK)
+                if pkg_name not in favored:
+                    jobs += sel.jobs(solv.Job.SOLVER_FAVOR)
+                    favored.add(pkg_name)
 
         for name in package_names:
             # Use multiple selection flags for flexibility
@@ -733,6 +762,7 @@ class Resolver:
         # Handle weak dependencies (Recommends/Suggests)
         if not self.install_recommends:
             solver.set_flag(solv.Solver.SOLVER_FLAG_IGNORE_RECOMMENDED, 1)
+
         problems = solver.solve(jobs)
 
         if problems:

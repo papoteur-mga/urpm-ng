@@ -2040,13 +2040,21 @@ def _check_preferences_compatibility(resolver, packages: list, preferences) -> l
     return warnings
 
 
-def _add_preferences_to_choices(pool, resolved_packages: set, choices: dict) -> None:
+def _add_preferences_to_choices(pool, resolved_packages: set, choices: dict) -> dict:
     """Add resolved packages to choices via their provides.
 
-    For each preferred package, find what capabilities it provides
-    and add them to choices so the solver knows to use these packages.
+    Only adds a capability to choices if exactly ONE package from resolved_packages
+    provides it. If multiple preferred packages provide the same capability,
+    returns them for user to choose.
+
+    Returns:
+        Dict of {capability: [providers]} for capabilities that need user choice
     """
     import solv
+    from collections import defaultdict
+
+    # First pass: collect all capabilities and their providers from resolved_packages
+    cap_to_providers = defaultdict(set)  # {capability: {provider1, provider2, ...}}
 
     for pkg_name in resolved_packages:
         sel = pool.select(pkg_name, solv.Selection.SELECTION_NAME)
@@ -2060,10 +2068,22 @@ def _add_preferences_to_choices(pool, resolved_packages: set, choices: dict) -> 
                     # Skip self-provide
                     if cap == s.name:
                         continue
-                    # Add to choices if not already set
-                    if cap not in choices:
-                        choices[cap] = s.name
+                    cap_to_providers[cap].add(s.name)
                 break  # Only need first matching solvable
+
+    # Collect capabilities needing user choice
+    needs_choice = {}
+
+    # Second pass: add to choices if exactly one provider, track conflicts
+    for cap, providers in cap_to_providers.items():
+        if cap not in choices:
+            if len(providers) == 1:
+                choices[cap] = next(iter(providers))
+            elif len(providers) > 1:
+                # Multiple favored packages provide this - user must choose
+                needs_choice[cap] = sorted(providers)
+
+    return needs_choice
 
 
 def _resolve_with_alternatives(resolver, packages: list, choices: dict,
@@ -2145,7 +2165,7 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
         # First pass: create pool and resolve preferences
         if not patterns_resolved:
             # Create pool without solving to resolve preferences
-            resolver._create_pool()
+            resolver.pool = resolver._create_pool()
             if resolver.pool:
                 preferences.resolve_patterns(resolver.pool)
                 patterns_resolved = True
@@ -2193,10 +2213,55 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
                             print(f"  {warn}")
                         print()
 
-                    # Add resolved packages to choices via their provides
-                    _add_preferences_to_choices(resolver.pool, preferences.resolved_packages, choices)
+                    # Add resolved packages to choices via their provides (only if unique provider)
+                    needs_choice = _add_preferences_to_choices(resolver.pool, preferences.resolved_packages, choices)
 
-        result = resolver.resolve_install(packages, choices=choices)
+                    # If multiple favored packages provide the same capability, ask user
+                    if needs_choice and not auto_mode:
+                        from . import colors
+                        rejected_packages = set()  # Packages user didn't choose
+
+                        for cap, providers in needs_choice.items():
+                            # Skip if only library packages or internal capabilities
+                            if cap.startswith(('lib', 'pkgconfig(')):
+                                continue
+                            # Skip capabilities that are just package names
+                            if cap in providers:
+                                continue
+
+                            print(f"\n{colors.info('Multiple options for')} {colors.bold(cap)}:")
+                            for i, prov in enumerate(providers, 1):
+                                print(f"  {i}. {prov}")
+                            try:
+                                answer = input(f"Choice? [1-{len(providers)}, Enter=1] ").strip()
+                                if not answer:
+                                    idx = 0
+                                else:
+                                    idx = int(answer) - 1
+                                if 0 <= idx < len(providers):
+                                    chosen = providers[idx]
+                                    choices[cap] = chosen
+                                    # Mark non-chosen alternatives as rejected
+                                    for prov in providers:
+                                        if prov != chosen:
+                                            rejected_packages.add(prov)
+                            except (ValueError, EOFError, KeyboardInterrupt):
+                                print("\nAborted")
+                                return None, True
+
+                        # Remove from choices any auto-added packages that were rejected
+                        if rejected_packages:
+                            caps_to_remove = [c for c, pkg in choices.items()
+                                             if pkg in rejected_packages]
+                            for cap in caps_to_remove:
+                                del choices[cap]
+
+        # Pass resolved_packages as favored_packages so solver prefers them
+        result = resolver.resolve_install(
+            packages,
+            choices=choices,
+            favored_packages=preferences.resolved_packages
+        )
 
         # Handle alternatives (multiple providers for same capability)
         if result.alternatives:
@@ -2488,31 +2553,23 @@ def cmd_install(args, db: PackageDatabase) -> int:
 
     if explicit_pkgs:
         print(f"  {colors.info(f'Requested ({len(explicit_pkgs)})')} - {format_size(explicit_size)}")
-        for a in explicit_pkgs[:5]:
+        for a in explicit_pkgs:
             print(f"    {a.name}-{a.evr}")
-        if len(explicit_pkgs) > 5:
-            print(f"    ... and {len(explicit_pkgs) - 5} more")
 
     if dep_pkgs:
         print(f"  {colors.dim(f'Dependencies ({len(dep_pkgs)})')} - {format_size(dep_size)}")
-        for a in dep_pkgs[:5]:
+        for a in dep_pkgs:
             print(f"    {a.name}-{a.evr}")
-        if len(dep_pkgs) > 5:
-            print(f"    ... and {len(dep_pkgs) - 5} more")
 
     if rec_pkgs:
         print(f"  {colors.success(f'Recommended ({len(rec_pkgs)})')} - {format_size(rec_size)}")
-        for a in rec_pkgs[:5]:
+        for a in rec_pkgs:
             print(f"    {a.name}-{a.evr}")
-        if len(rec_pkgs) > 5:
-            print(f"    ... and {len(rec_pkgs) - 5} more")
 
     if sug_pkgs:
         print(f"  {colors.warning(f'Suggested ({len(sug_pkgs)})')} - {format_size(sug_size)}")
-        for a in sug_pkgs[:5]:
+        for a in sug_pkgs:
             print(f"    {a.name}-{a.evr}")
-        if len(sug_pkgs) > 5:
-            print(f"    ... and {len(sug_pkgs) - 5} more")
 
     # Final confirmation
     print(f"\n{colors.bold(f'Total: {len(final_actions)} packages')} ({format_size(total_size)})")
@@ -6049,7 +6106,6 @@ class PreferencesMatcher:
         self.name_patterns = []  # [pattern, ...]
         self.resolved_packages = set()  # Packages resolved from patterns via whatprovides
         self._compatible_providers = set()  # Packages that require something resolved_packages provide
-
         if prefer_str:
             for part in prefer_str.split(','):
                 part = part.strip()
