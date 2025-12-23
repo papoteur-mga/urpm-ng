@@ -100,6 +100,25 @@ urpm media update
 
 # urpm - Command Line Interface
 
+## Display Options
+
+Most commands support these output options:
+
+```bash
+--show-all            # Show all items without truncation
+--flat                # One item per line (parsable by scripts)
+--json                # JSON output (for programmatic use)
+```
+
+By default, long lists are displayed in multi-column format and truncated to 10 lines with "... and N more". Use `--show-all` to see everything.
+
+Examples:
+```bash
+urpm list installed --flat          # One package per line
+urpm search firefox --json          # JSON output
+urpm i task-plasma --show-all       # Show all dependencies
+```
+
 ## Package Management
 
 ### Install packages

@@ -119,35 +119,29 @@ class AliasedSubParsersAction(argparse._SubParsersAction):
 
 def create_parser() -> argparse.ArgumentParser:
     """Create the main argument parser with all commands and aliases."""
-    
+
     parser = argparse.ArgumentParser(
         prog='urpm',
         description='Modern package manager for Mageia Linux',
         epilog='Use "urpm <command> --help" for command-specific help.'
     )
-    
+
     parser.add_argument(
         '--version', '-V',
         action='version',
         version=f'urpm {__version__}'
     )
-    
+
     parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Verbose output'
     )
-    
+
     parser.add_argument(
         '--quiet', '-q',
         action='store_true',
         help='Quiet output'
-    )
-    
-    parser.add_argument(
-        '--json',
-        action='store_true',
-        help='JSON output for scripting'
     )
 
     parser.add_argument(
@@ -156,21 +150,43 @@ def create_parser() -> argparse.ArgumentParser:
         help='Disable colored output'
     )
 
+    # Parent parser for display options (inherited by subparsers)
+    display_parent = argparse.ArgumentParser(add_help=False)
+    display_parent.add_argument(
+        '--json',
+        action='store_true',
+        help='JSON output for scripting'
+    )
+    display_parent.add_argument(
+        '--flat',
+        action='store_true',
+        help='Flat output (one item per line, parsable)'
+    )
+    display_parent.add_argument(
+        '--show-all',
+        action='store_true',
+        help='Show all items without truncation'
+    )
+
     # Register custom action for aliases
     parser.register('action', 'parsers', AliasedSubParsersAction)
-    
+
     subparsers = parser.add_subparsers(
         dest='command',
         title='commands',
         metavar='<command>'
     )
+
+    # Store parent for use by subparsers
+    parser._display_parent = display_parent
     
     # =========================================================================
     # install / i
     # =========================================================================
     install_parser = subparsers.add_parser(
         'install', aliases=['i'],
-        help='Install packages'
+        help='Install packages',
+        parents=[display_parent]
     )
     install_parser.add_argument(
         'packages', nargs='+',
@@ -232,7 +248,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     erase_parser = subparsers.add_parser(
         'erase', aliases=['e'],
-        help='Erase (remove) packages'
+        help='Erase (remove) packages',
+        parents=[display_parent]
     )
     erase_parser.add_argument(
         'packages', nargs='*',
@@ -279,7 +296,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     search_parser = subparsers.add_parser(
         'search', aliases=['s', 'query', 'q'],
-        help='Search packages'
+        help='Search packages',
+        parents=[display_parent]
     )
     search_parser.add_argument(
         'pattern',
@@ -296,7 +314,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     show_parser = subparsers.add_parser(
         'show', aliases=['sh', 'info'],
-        help='Show package details'
+        help='Show package details',
+        parents=[display_parent]
     )
     show_parser.add_argument(
         'package',
@@ -318,7 +337,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     list_parser = subparsers.add_parser(
         'list', aliases=['l'],
-        help='List packages'
+        help='List packages',
+        parents=[display_parent]
     )
     list_parser.add_argument(
         'filter',
@@ -333,7 +353,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     provides_parser = subparsers.add_parser(
         'provides', aliases=['p'],
-        help='Show what a package provides'
+        help='Show what a package provides',
+        parents=[display_parent]
     )
     provides_parser.add_argument(
         'package',
@@ -345,7 +366,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     whatprovides_parser = subparsers.add_parser(
         'whatprovides', aliases=['wp'],
-        help='Find packages providing a capability'
+        help='Find packages providing a capability',
+        parents=[display_parent]
     )
     whatprovides_parser.add_argument(
         'capability',
@@ -357,7 +379,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     find_parser = subparsers.add_parser(
         'find', aliases=['f'],
-        help='Find which package contains a file'
+        help='Find which package contains a file',
+        parents=[display_parent]
     )
     find_parser.add_argument(
         'pattern',
@@ -369,7 +392,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     depends_parser = subparsers.add_parser(
         'depends', aliases=['d'],
-        help='Show package dependencies'
+        help='Show package dependencies',
+        parents=[display_parent]
     )
     depends_parser.add_argument(
         'package',
@@ -406,7 +430,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     rdepends_parser = subparsers.add_parser(
         'rdepends', aliases=['rd'],
-        help='Show reverse dependencies'
+        help='Show reverse dependencies',
+        parents=[display_parent]
     )
     rdepends_parser.add_argument(
         'package',
@@ -428,7 +453,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     update_parser = subparsers.add_parser(
         'update', aliases=['up'],
-        help='Update packages or metadata'
+        help='Update packages or metadata',
+        parents=[display_parent]
     )
     update_parser.add_argument(
         'packages', nargs='*',
@@ -480,7 +506,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     upgrade_parser = subparsers.add_parser(
         'upgrade', aliases=['u'],
-        help='Upgrade packages (all if none specified)'
+        help='Upgrade packages (all if none specified)',
+        parents=[display_parent]
     )
     upgrade_parser.add_argument(
         'packages', nargs='*',
@@ -532,7 +559,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     autoremove_parser = subparsers.add_parser(
         'autoremove', aliases=['ar'],
-        help='Remove orphaned packages, old kernels, or failed deps'
+        help='Remove orphaned packages, old kernels, or failed deps',
+        parents=[display_parent]
     )
     autoremove_parser.add_argument(
         '--orphans', '-o',
@@ -565,7 +593,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     mark_parser = subparsers.add_parser(
         'mark',
-        help='Mark packages as manual or auto-installed'
+        help='Mark packages as manual or auto-installed',
+        parents=[display_parent]
     )
     mark_subparsers = mark_parser.add_subparsers(
         dest='mark_command',
@@ -604,7 +633,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     media_parser = subparsers.add_parser(
         'media', aliases=['m'],
-        help='Manage media sources'
+        help='Manage media sources',
+        parents=[display_parent]
     )
     media_subparsers = media_parser.add_subparsers(
         dest='media_command',
@@ -702,7 +732,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     cache_parser = subparsers.add_parser(
         'cache', aliases=['c'],
-        help='Manage cache'
+        help='Manage cache',
+        parents=[display_parent]
     )
     cache_subparsers = cache_parser.add_subparsers(
         dest='cache_command',
@@ -733,7 +764,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     history_parser = subparsers.add_parser(
         'history', aliases=['h'],
-        help='Show transaction history'
+        help='Show transaction history',
+        parents=[display_parent]
     )
     history_parser.add_argument(
         'count', nargs='?', type=int, default=20,
@@ -761,7 +793,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     rollback_parser = subparsers.add_parser(
         'rollback', aliases=['r'],
-        help='Rollback transactions: "rollback 5" (last 5), "rollback to 42" (to #42), "rollback to 26/11/2025"'
+        help='Rollback transactions: "rollback 5" (last 5), "rollback to 42" (to #42), "rollback to 26/11/2025"',
+        parents=[display_parent]
     )
     rollback_parser.add_argument(
         'args', nargs='*',
@@ -777,7 +810,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     undo_parser = subparsers.add_parser(
         'undo',
-        help='Undo last transaction, or a specific one'
+        help='Undo last transaction, or a specific one',
+        parents=[display_parent]
     )
     undo_parser.add_argument(
         'transaction_id', nargs='?', type=int,
@@ -793,7 +827,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     cleandeps_parser = subparsers.add_parser(
         'cleandeps', aliases=['cd'],
-        help='Remove orphan deps from interrupted transactions (alias: autoremove --faildeps)'
+        help='Remove orphan deps from interrupted transactions (alias: autoremove --faildeps)',
+        parents=[display_parent]
     )
     cleandeps_parser.add_argument(
         '--auto', '-y', action='store_true',
@@ -805,7 +840,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     config_parser = subparsers.add_parser(
         'config', aliases=['cfg'],
-        help='Manage urpm configuration'
+        help='Manage urpm configuration',
+        parents=[display_parent]
     )
     config_subparsers = config_parser.add_subparsers(dest='config_cmd', metavar='COMMAND')
 
@@ -847,7 +883,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     key_parser = subparsers.add_parser(
         'key', aliases=['k'],
-        help='Manage GPG keys for package verification'
+        help='Manage GPG keys for package verification',
+        parents=[display_parent]
     )
     key_subparsers = key_parser.add_subparsers(dest='key_cmd', metavar='COMMAND')
 
@@ -864,7 +901,8 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     peer_parser = subparsers.add_parser(
         'peer',
-        help='Manage P2P peers (provenance, blacklist)'
+        help='Manage P2P peers (provenance, blacklist)',
+        parents=[display_parent]
     )
     peer_subparsers = peer_parser.add_subparsers(
         dest='peer_command',
@@ -1197,18 +1235,14 @@ def cmd_show(args, db: PackageDatabase) -> int:
     if pkg.get('requires'):
         req_count = len(pkg['requires'])
         print(f"\n{colors.bold(f'Requires ({req_count}):')} ")
-        for dep in pkg['requires'][:10]:
-            print(f"  {colors.dim('-')} {dep}")
-        if req_count > 10:
-            print(colors.dim(f"  ... and {req_count - 10} more"))
+        from . import display
+        display.print_package_list(pkg['requires'], max_lines=10, color_func=colors.dim)
 
     if pkg.get('provides'):
         prov_count = len(pkg['provides'])
         print(f"\n{colors.bold(f'Provides ({prov_count}):')} ")
-        for prov in pkg['provides'][:5]:
-            print(f"  {colors.dim('-')} {prov}")
-        if prov_count > 5:
-            print(colors.dim(f"  ... and {prov_count - 5} more"))
+        from . import display
+        display.print_package_list(pkg['provides'], max_lines=5, color_func=colors.dim)
 
     print()
     return 0
@@ -1761,13 +1795,9 @@ def cmd_cache_clean(args, db: PackageDatabase) -> int:
 
     print(f"\nFound {len(orphans)} orphan RPMs ({size_str}):")
 
-    if args.verbose or len(orphans) <= 10:
-        for rpm_file in orphans:
-            print(f"  {rpm_file.name}")
-    else:
-        for rpm_file in orphans[:5]:
-            print(f"  {rpm_file.name}")
-        print(f"  ... and {len(orphans) - 5} more")
+    from . import display
+    rpm_names = [rpm_file.name for rpm_file in orphans]
+    display.print_package_list(rpm_names, max_lines=10)
 
     if args.dry_run:
         print(f"\nDry run: would remove {len(orphans)} files ({size_str})")
@@ -2500,10 +2530,9 @@ def cmd_install(args, db: PackageDatabase) -> int:
     # In interactive mode: ask about recommends (unless --without-recommends)
     if rec_pkgs and not args.auto and not without_recommends:
         print(f"\n{colors.success(f'Recommended packages ({len(rec_pkgs)})')} - {format_size(rec_size)}")
-        for a in rec_pkgs[:5]:
-            print(f"  {a.name}-{a.evr}")
-        if len(rec_pkgs) > 5:
-            print(f"  ... and {len(rec_pkgs) - 5} more")
+        from . import display
+        rec_names = [f"{a.name}-{a.evr}" for a in rec_pkgs]
+        display.print_package_list(rec_names, max_lines=5)
         try:
             answer = input(f"\nInstall recommended packages? [Y/n] ")
             install_recommends_final = answer.lower() not in ('n', 'no')
@@ -2514,10 +2543,9 @@ def cmd_install(args, db: PackageDatabase) -> int:
     # In interactive mode with --with-suggests: ask about suggests
     if suggests and not args.auto:
         print(f"\n{colors.warning(f'Suggested packages ({len(suggests)})')} - {format_size(sug_size)}")
-        for a in suggests[:5]:
-            print(f"  {a.name}-{a.evr}")
-        if len(suggests) > 5:
-            print(f"  ... and {len(suggests) - 5} more")
+        from . import display
+        sug_names = [f"{a.name}-{a.evr}" for a in suggests]
+        display.print_package_list(sug_names, max_lines=5)
         try:
             answer = input(f"\nInstall suggested packages? [Y/n] ")
             install_suggests = answer.lower() not in ('n', 'no')
@@ -2575,26 +2603,27 @@ def cmd_install(args, db: PackageDatabase) -> int:
 
     # Show final transaction summary
     print(f"\n{colors.bold('Transaction summary:')}\n")
+    from . import display
 
     if explicit_pkgs:
         print(f"  {colors.info(f'Requested ({len(explicit_pkgs)})')} - {format_size(explicit_size)}")
-        for a in explicit_pkgs:
-            print(f"    {a.name}-{a.evr}")
+        pkg_names = [f"{a.name}-{a.evr}" for a in explicit_pkgs]
+        display.print_package_list(pkg_names, indent=4)
 
     if dep_pkgs:
         print(f"  {colors.dim(f'Dependencies ({len(dep_pkgs)})')} - {format_size(dep_size)}")
-        for a in dep_pkgs:
-            print(f"    {a.name}-{a.evr}")
+        pkg_names = [f"{a.name}-{a.evr}" for a in dep_pkgs]
+        display.print_package_list(pkg_names, indent=4)
 
     if rec_pkgs:
         print(f"  {colors.success(f'Recommended ({len(rec_pkgs)})')} - {format_size(rec_size)}")
-        for a in rec_pkgs:
-            print(f"    {a.name}-{a.evr}")
+        pkg_names = [f"{a.name}-{a.evr}" for a in rec_pkgs]
+        display.print_package_list(pkg_names, indent=4)
 
     if sug_pkgs:
         print(f"  {colors.warning(f'Suggested ({len(sug_pkgs)})')} - {format_size(sug_size)}")
-        for a in sug_pkgs:
-            print(f"    {a.name}-{a.evr}")
+        pkg_names = [f"{a.name}-{a.evr}" for a in sug_pkgs]
+        display.print_package_list(pkg_names, indent=4)
 
     # Final confirmation
     print(f"\n{colors.bold(f'Total: {len(final_actions)} packages')} ({format_size(total_size)})")
@@ -2975,16 +3004,17 @@ def cmd_erase(args, db: PackageDatabase) -> int:
 
     # Show what will be erased (without orphans first)
     print(f"\n{colors.bold(f'The following {len(all_actions)} package(s) will be erased:')}")
+    from . import display
 
     if explicit:
         print(f"\n  {colors.info(f'Requested ({len(explicit)}):')}")
-        for action in explicit:
-            print(f"    {action.nevra}")
+        pkg_names = [a.nevra for a in explicit]
+        display.print_package_list(pkg_names, indent=4, color_func=colors.error)
 
     if deps:
         print(f"\n  {colors.warning(f'Reverse dependencies ({len(deps)}):')}")
-        for action in deps:
-            print(f"    {action.nevra}")
+        pkg_names = [a.nevra for a in deps]
+        display.print_package_list(pkg_names, indent=4, color_func=colors.warning)
 
     # Handle orphans: ask or auto-include
     if orphans:
@@ -2996,13 +3026,13 @@ def cmd_erase(args, db: PackageDatabase) -> int:
             # Include orphans automatically
             include_orphans = True
             print(f"\n  {colors.warning(f'Orphaned dependencies ({len(orphans)}):')}")
-            for action in orphans:
-                print(f"    {action.nevra}")
+            pkg_names = [a.nevra for a in orphans]
+            display.print_package_list(pkg_names, indent=4, color_func=colors.warning)
         else:
             # Ask user about orphans
             print(f"\n  {colors.dim(f'Orphaned dependencies that could be removed ({len(orphans)}):')}")
-            for action in orphans:
-                print(f"    {colors.dim(action.nevra)}")
+            pkg_names = [a.nevra for a in orphans]
+            display.print_package_list(pkg_names, indent=4, color_func=colors.dim)
             try:
                 response = input(f"\n  Also remove these {len(orphans)} orphaned packages? [y/N] ")
                 include_orphans = response.lower() in ('y', 'yes')
@@ -3235,28 +3265,28 @@ def cmd_update(args, db: PackageDatabase) -> int:
         orphans = resolver.find_upgrade_orphans(upgrades)
 
     # Show packages by category
-    from . import colors
+    from . import colors, display
     print(f"\n{colors.bold('Transaction summary:')}")
     if upgrades:
         print(f"\n  {colors.info(f'Upgrade ({len(upgrades)}):')}")
-        for a in sorted(upgrades, key=lambda x: x.name.lower()):
-            print(f"    {colors.info(a.nevra)}")
+        pkg_names = [a.nevra for a in sorted(upgrades, key=lambda x: x.name.lower())]
+        display.print_package_list(pkg_names, indent=4, color_func=colors.info)
     if installs:
         print(f"\n  {colors.success(f'Install ({len(installs)}) - new dependencies:')}")
-        for a in sorted(installs, key=lambda x: x.name.lower()):
-            print(f"    {colors.success(a.nevra)}")
+        pkg_names = [a.nevra for a in sorted(installs, key=lambda x: x.name.lower())]
+        display.print_package_list(pkg_names, indent=4, color_func=colors.success)
     if removes:
         print(f"\n  {colors.error(f'Remove ({len(removes)}) - obsoleted:')}")
-        for a in sorted(removes, key=lambda x: x.name.lower()):
-            print(f"    {colors.error(a.nevra)}")
+        pkg_names = [a.nevra for a in sorted(removes, key=lambda x: x.name.lower())]
+        display.print_package_list(pkg_names, indent=4, color_func=colors.error)
     if downgrades:
         print(f"\n  {colors.warning(f'Downgrade ({len(downgrades)}):')}")
-        for a in sorted(downgrades, key=lambda x: x.name.lower()):
-            print(f"    {colors.warning(a.nevra)}")
+        pkg_names = [a.nevra for a in sorted(downgrades, key=lambda x: x.name.lower())]
+        display.print_package_list(pkg_names, indent=4, color_func=colors.warning)
     if orphans:
         print(f"\n  {colors.error(f'Remove ({len(orphans)}) - orphaned dependencies:')}")
-        for a in sorted(orphans, key=lambda x: x.name.lower()):
-            print(f"    {colors.error(a.nevra)}")
+        pkg_names = [a.nevra for a in sorted(orphans, key=lambda x: x.name.lower())]
+        display.print_package_list(pkg_names, indent=4, color_func=colors.error)
 
     if result.install_size > 0:
         print(f"\nDownload size: {format_size(result.install_size)}")
@@ -4152,6 +4182,7 @@ def cmd_autoremove(args, db: PackageDatabase) -> int:
     # Display summary
     total_size = sum(size for _, _, size, _ in packages_to_remove)
     print(f"\n{colors.bold(f'The following {len(packages_to_remove)} package(s) will be removed:')}")
+    from . import display
 
     # Group by reason for display
     by_reason = {}
@@ -4169,8 +4200,7 @@ def cmd_autoremove(args, db: PackageDatabase) -> int:
     for reason, nevras in by_reason.items():
         label = reason_labels.get(reason, reason)
         print(f"\n  {colors.error(f'{label} ({len(nevras)}):')}")
-        for nevra in sorted(nevras):
-            print(f"    {colors.error(nevra)}")
+        display.print_package_list(sorted(nevras), indent=4, color_func=colors.error)
 
     print(f"\nDisk space to free: {format_size(total_size)}")
 
@@ -4984,10 +5014,8 @@ def cmd_peer(args, db: PackageDatabase) -> int:
         # Confirm deletion
         if not args.yes:
             print(f"\nFiles to delete:")
-            for p in existing[:10]:
-                print(f"  {p}")
-            if len(existing) > 10:
-                print(f"  ... and {len(existing) - 10} more")
+            from . import display
+            display.print_package_list(existing, max_lines=10)
 
             try:
                 response = input(f"\nDelete {len(existing)} files? [y/N] ")
@@ -5562,10 +5590,8 @@ def cmd_cleandeps(args, db: PackageDatabase) -> int:
     all_orphans = unique_orphans
 
     print(f"\nFound {len(all_orphans)} orphan dependencies from {len(interrupted)} interrupted transaction(s):")
-    for nevra in all_orphans[:10]:
-        print(f"  {nevra}")
-    if len(all_orphans) > 10:
-        print(f"  ... and {len(all_orphans) - 10} more")
+    from . import display
+    display.print_package_list(all_orphans, max_lines=10)
 
     if not args.auto:
         try:
@@ -6957,6 +6983,15 @@ def main(argv=None) -> int:
     # Initialize color support
     from . import colors
     colors.init(nocolor=getattr(args, 'nocolor', False))
+
+    # Initialize display mode
+    from . import display
+    if getattr(args, 'json', False):
+        display.init(mode='json', show_all=True)  # JSON always shows all
+    elif getattr(args, 'flat', False):
+        display.init(mode='flat', show_all=True)  # Flat always shows all
+    else:
+        display.init(mode='columns', show_all=getattr(args, 'show_all', False))
 
     if not args.command:
         parser.print_help()
