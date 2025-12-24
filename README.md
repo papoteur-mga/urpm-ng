@@ -201,9 +201,20 @@ urpm ar                       # Short alias
 ```bash
 urpm search <pattern>         # Search by name/summary
 urpm s <pattern>              # Short alias
+urpm q <pattern>              # Query alias (urpmq compatibility)
 
 # Options
 --installed                   # Search only installed packages
+--unavailable                 # List installed packages not in any media
+```
+
+#### Find unavailable packages
+
+List packages that are installed but no longer available in any configured media (like `urpmq --unavailable`):
+
+```bash
+urpm q --unavailable          # List all unavailable packages
+urpm q --unavailable php      # Filter by pattern
 ```
 
 ### Show package info

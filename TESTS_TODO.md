@@ -33,6 +33,13 @@
   - Tester mode --auto prend le premier choix automatiquement
   - Tester re-résolution après choix utilisateur
 
+- [ ] Option --unavailable (urpm q --unavailable)
+  - Tester `urpm q --unavailable` liste les paquets installés absents des médias
+  - Installer un paquet puis le retirer du média, vérifier qu'il apparaît
+  - Tester avec pattern : `urpm q --unavailable php` filtre par nom
+  - Vérifier que gpg-pubkey n'apparaît pas dans la liste
+  - Tester sur système propre (devrait afficher "All installed packages are available")
+
 - [ ] Option --prefer (résolution guidée par préférences)
   **Tests intensifs requis - fonctionnalité complexe**
 

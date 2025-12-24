@@ -300,13 +300,18 @@ def create_parser() -> argparse.ArgumentParser:
         parents=[display_parent]
     )
     search_parser.add_argument(
-        'pattern',
-        help='Search pattern'
+        'pattern', nargs='?', default='',
+        help='Search pattern (optional with --unavailable)'
     )
     search_parser.add_argument(
         '--installed',
         action='store_true',
         help='Search only installed packages'
+    )
+    search_parser.add_argument(
+        '--unavailable',
+        action='store_true',
+        help='List installed packages not available in any media'
     )
 
     # =========================================================================
@@ -1168,10 +1173,91 @@ def _resolve_virtual_package(db: PackageDatabase, pkg_name: str, auto: bool, ins
     return [matching_families[sorted_families[0]][0]['name']]
 
 
+def _cmd_search_unavailable(args, db: PackageDatabase) -> int:
+    """List installed packages not available in any media (urpmq --unavailable)."""
+    import rpm
+    from . import colors
+
+    # Build set of available package names from all medias
+    available_names = set()
+    for media in db.list_media():
+        if not media['enabled']:
+            continue
+        # Get all packages from this media
+        cursor = db.conn.execute(
+            "SELECT DISTINCT name_lower FROM packages WHERE media_id = ?",
+            (media['id'],)
+        )
+        for row in cursor:
+            available_names.add(row[0])
+
+    # Get all installed packages
+    ts = rpm.TransactionSet()
+    unavailable = []
+
+    for hdr in ts.dbMatch():
+        name = hdr[rpm.RPMTAG_NAME]
+        # Skip gpg-pubkey pseudo-packages
+        if name == 'gpg-pubkey':
+            continue
+
+        if name.lower() not in available_names:
+            version = hdr[rpm.RPMTAG_VERSION]
+            release = hdr[rpm.RPMTAG_RELEASE]
+            arch = hdr[rpm.RPMTAG_ARCH]
+            unavailable.append({
+                'name': name,
+                'version': version,
+                'release': release,
+                'arch': arch,
+                'nevra': f"{name}-{version}-{release}.{arch}"
+            })
+
+    if not unavailable:
+        print(colors.success("All installed packages are available in configured media"))
+        return 0
+
+    # Sort by name
+    unavailable.sort(key=lambda p: p['name'].lower())
+
+    # Filter by pattern if provided
+    if args.pattern:
+        import re
+        try:
+            regex = re.compile(args.pattern, re.IGNORECASE)
+            unavailable = [p for p in unavailable if regex.search(p['name'])]
+        except re.error:
+            unavailable = [p for p in unavailable if args.pattern.lower() in p['name'].lower()]
+
+        if not unavailable:
+            print(colors.warning(f"No unavailable packages match '{args.pattern}'"))
+            return 1
+
+    # Display results
+    for pkg in unavailable:
+        name = colors.bold(pkg['name'])
+        version = pkg['version']
+        release_arch = colors.dim(f"{pkg['release']}.{pkg['arch']}")
+        print(f"{name}-{version}-{release_arch}")
+
+    print(colors.dim(f"\n{len(unavailable)} unavailable package(s)"))
+    return 0
+
+
 def cmd_search(args, db: PackageDatabase) -> int:
     """Handle search command."""
     import re
     from . import colors
+
+    # Handle --unavailable: list installed packages not in any media
+    if getattr(args, 'unavailable', False):
+        return _cmd_search_unavailable(args, db)
+
+    # Regular search requires a pattern
+    if not args.pattern:
+        print(colors.error("Error: search pattern required"))
+        print(colors.dim("  Use --unavailable to list packages not in any media"))
+        return 1
 
     results = db.search(args.pattern, search_provides=True)
 
