@@ -2098,6 +2098,12 @@ def _check_preferences_compatibility(resolver, packages: list, preferences) -> l
 
     warnings = []
 
+    # Internal capabilities that should not trigger alternative locking
+    INTERNAL_CAPABILITIES = {
+        'should-restart', 'postshell', 'config', 'bundled', 'debuginfo',
+        'application', 'application()',
+    }
+
     # Build test jobs: INSTALL preferred packages, LOCK alternatives
     jobs = []
     favored = set()
@@ -2112,8 +2118,15 @@ def _check_preferences_compatibility(resolver, packages: list, preferences) -> l
                 jobs += sel.jobs(solv.Job.SOLVER_INSTALL)
                 for dep in s.lookup_deparray(solv.SOLVABLE_PROVIDES):
                     cap = str(dep).split()[0]
-                    if not cap.startswith(('rpmlib(', '/', 'lib')) and '(' not in cap:
-                        preferred_caps[cap] = pkg_name
+                    # Skip noise and internal capabilities
+                    if cap.startswith(('rpmlib(', '/', 'lib', 'pkgconfig(')):
+                        continue
+                    if cap in INTERNAL_CAPABILITIES:
+                        continue
+                    # Skip self-provide (package name = capability)
+                    if cap == s.name:
+                        continue
+                    preferred_caps[cap] = pkg_name
                 break
 
     # Lock alternatives for key capabilities
@@ -2182,6 +2195,8 @@ def _add_preferences_to_choices(pool, resolved_packages: set, choices: dict) -> 
         'config',               # generic config capability
         'bundled',              # bundled library marker
         'debuginfo',            # debug info marker
+        'application',          # generic "is an application" marker
+        'application()',        # same with parentheses
     }
 
     # First pass: collect all capabilities and their providers from resolved_packages
@@ -2335,64 +2350,13 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
 
                     preferences_applied = True
 
-                # Check if preferences are compatible before continuing
-                if preferences.resolved_packages:
-                    compat_warnings = _check_preferences_compatibility(
-                        resolver, packages, preferences
-                    )
-                    if compat_warnings:
-                        from . import colors
-                        print(f"\n{colors.warning('Warning:')} Preferences may be incompatible:")
-                        for warn in compat_warnings:
-                            print(f"  {warn}")
-                        print()
+                # NOTE: We no longer pre-validate preferences here.
+                # Instead, preferences are applied during the iterative resolution
+                # when alternatives are encountered (see match_preference() below).
+                # This avoids false conflicts from aggressive LOCKing.
 
-                    # Add resolved packages to choices via their provides (only if unique provider)
-                    needs_choice = _add_preferences_to_choices(resolver.pool, preferences.resolved_packages, choices)
-
-                    # If multiple favored packages provide the same capability, ask user
-                    if needs_choice and not auto_mode:
-                        from . import colors
-                        rejected_packages = set()  # Packages user didn't choose
-
-                        for cap, providers in needs_choice.items():
-                            # Skip if only library packages or internal capabilities
-                            if cap.startswith(('lib', 'pkgconfig(')):
-                                continue
-                            # Skip capabilities that are just package names
-                            if cap in providers:
-                                continue
-
-                            print(f"\n{colors.info('Multiple options for')} {colors.bold(cap)}:")
-                            for i, prov in enumerate(providers, 1):
-                                print(f"  {i}. {prov}")
-                            try:
-                                answer = input(f"Choice? [1-{len(providers)}, Enter=1] ").strip()
-                                if not answer:
-                                    idx = 0
-                                else:
-                                    idx = int(answer) - 1
-                                if 0 <= idx < len(providers):
-                                    chosen = providers[idx]
-                                    choices[cap] = chosen
-                                    # Mark non-chosen alternatives as rejected
-                                    for prov in providers:
-                                        if prov != chosen:
-                                            rejected_packages.add(prov)
-                            except (ValueError, EOFError, KeyboardInterrupt):
-                                print("\nAborted")
-                                return None, True
-
-                        # Remove from choices any auto-added packages that were rejected
-                        if rejected_packages:
-                            caps_to_remove = [c for c, pkg in choices.items()
-                                             if pkg in rejected_packages]
-                            for cap in caps_to_remove:
-                                del choices[cap]
-
-        # Pass resolved_packages AND compatible_providers as favored_packages
-        # so solver prefers both the explicitly preferred packages AND packages
-        # that depend on them (e.g., php8.4-fpm-apache depends on php8.4-fpm)
+        # Pass favored/disfavored to help solver make consistent choices
+        # but don't pre-validate - let the iterative process handle conflicts
         favored = preferences.resolved_packages | preferences._compatible_providers
         result = resolver.resolve_install(
             packages,
@@ -2658,11 +2622,49 @@ def cmd_install(args, db: PackageDatabase) -> int:
         )
         if aborted:
             return 1
+
+        # If resolution failed and we have suggests, try removing problematic suggests
+        skipped_suggests = {}  # suggest_name -> reason
+        if not result.success and install_suggests and suggests:
+            suggest_names_set = set(suggest_names)
+
+            # Find suggests mentioned in problems and store the reason
+            for prob in result.problems:
+                prob_str = str(prob)
+                for sug_name in suggest_names:
+                    if sug_name in prob_str:
+                        skipped_suggests[sug_name] = prob_str
+
+            # If we found problematic suggests, retry without them
+            if skipped_suggests:
+                remaining_suggests = [s for s in suggest_names if s not in skipped_suggests]
+                retry_packages = resolved_packages + remaining_suggests
+
+                # Retry resolution
+                resolver = Resolver(db, install_recommends=install_recommends_final)
+                result, aborted = _resolve_with_alternatives(
+                    resolver, retry_packages, choices, args.auto, preferences
+                )
+                if aborted:
+                    return 1
+
+                # Update suggest_names for marking below
+                suggest_names = remaining_suggests
+
         if not result.success:
             print("Resolution failed:")
             for p in result.problems:
                 print(f"  {p}")
             return 1
+
+        # Show skipped suggests with reasons
+        if skipped_suggests:
+            from . import colors
+            print(f"\n{colors.warning('Skipped suggests:')}")
+            for sug in sorted(skipped_suggests.keys()):
+                reason = skipped_suggests[sug]
+                print(f"  {colors.dim(sug)}: {reason}")
+
         # Mark the suggest packages with the right reason
         if install_suggests and suggests:
             for action in result.actions:
