@@ -512,13 +512,27 @@ class Downloader:
         return self.cache_dir / item.filename
 
     def is_cached(self, item: DownloadItem) -> bool:
-        """Check if package is already in cache."""
+        """Check if package is already in cache and is a valid RPM.
+
+        Verifies:
+        - File exists and is not empty
+        - File has valid RPM magic bytes (0xedabeedb)
+
+        This catches partial downloads and corrupted files.
+        Full signature verification is done at install time.
+        """
         path = self.get_cache_path(item)
         if not path.exists():
             return False
-        # File exists and has content - consider it cached
-        # Note: item.size is installed size, not RPM file size
-        return path.stat().st_size > 0
+        if path.stat().st_size == 0:
+            return False
+        # Check RPM magic bytes
+        try:
+            with open(path, 'rb') as f:
+                magic = f.read(4)
+            return magic == b'\xed\xab\xee\xdb'
+        except OSError:
+            return False
 
     def download_one(self, item: DownloadItem,
                      progress_callback: Callable[[int, int], None] = None,

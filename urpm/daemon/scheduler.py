@@ -384,7 +384,7 @@ class Scheduler:
         """Download packages for updates.
 
         Args:
-            updates: List of update dicts with name, available version, etc.
+            updates: List of update dicts with name, available version, arch, media_name, etc.
         """
         from ..core.download import Downloader, DownloadItem
 
@@ -393,32 +393,54 @@ class Scheduler:
 
         downloader = Downloader(cache_dir=self.base_dir)
 
+        # Cache media URLs to avoid repeated DB lookups
+        media_urls = {}
+        for media in self.db.list_media():
+            media_urls[media['name']] = media.get('url', '')
+
         items = []
         for update in updates:
-            pkg_name = update['name']
-            pkg_info = self.db.get_package(pkg_name)
-            if not pkg_info:
+            media_name = update.get('media_name', '')
+            media_url = media_urls.get(media_name, '')
+            if not media_url:
+                logger.debug(f"No media URL for {update['name']} (media={media_name})")
                 continue
 
-            url = pkg_info.get('url')
-            filename = pkg_info.get('filename')
-            if url and filename:
-                items.append(DownloadItem(
-                    url=url,
-                    filename=filename,
-                    size=update.get('size', 0),
-                ))
+            # Parse EVR to extract version and release
+            # EVR format: [epoch:]version-release
+            evr = update.get('available', '')
+            if ':' in evr:
+                evr = evr.split(':', 1)[1]  # Strip epoch
+            if '-' in evr:
+                version, release = evr.rsplit('-', 1)
+            else:
+                version = evr
+                release = '1'
+
+            items.append(DownloadItem(
+                name=update['name'],
+                version=version,
+                release=release,
+                arch=update['arch'],
+                media_url=media_url,
+                media_name=media_name,
+                size=update.get('size', 0),
+            ))
 
         if items:
             # Download with progress logging
-            def progress_callback(item, downloaded, total):
-                if total > 0:
-                    pct = downloaded * 100 // total
-                    logger.debug(f"Pre-downloading {item.filename}: {pct}%")
+            # Callback signature: (name, pkg_num, pkg_total, bytes_done, bytes_total,
+            #                      item_bytes, item_total, active_downloads)
+            def progress_callback(name, pkg_num, pkg_total, bytes_done, bytes_total,
+                                  item_bytes=None, item_total=None, active_downloads=None):
+                if bytes_total > 0:
+                    pct = bytes_done * 100 // bytes_total
+                    logger.debug(f"Pre-downloading {name}: {pct}% ({pkg_num}/{pkg_total})")
 
-            result = downloader.download(items, progress_callback)
-            logger.info(f"Pre-download complete: {result.downloaded} downloaded, "
-                       f"{result.cached} cached, {len(result.errors)} errors")
+            results, downloaded, cached, peer_stats = downloader.download_all(items, progress_callback)
+            errors = [r for r in results if not r.success]
+            logger.info(f"Pre-download complete: {downloaded} downloaded, "
+                       f"{cached} cached, {len(errors)} errors")
 
     def _run_cache_cleanup(self):
         """Clean up old cached packages."""
@@ -509,6 +531,7 @@ class Scheduler:
                     'available': action.evr,
                     'arch': action.arch,
                     'size': action.size,
+                    'media_name': action.media_name,
                 })
                 total_size += action.size or 0
 
