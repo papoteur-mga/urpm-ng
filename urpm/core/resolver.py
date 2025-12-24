@@ -512,6 +512,52 @@ class Resolver:
 
         return requires
 
+    def get_package_recommends(self, package_name: str) -> List[str]:
+        """Get the recommends of a package.
+
+        Args:
+            package_name: The package name
+
+        Returns:
+            List of capability strings that the package recommends
+        """
+        if self.pool is None:
+            self.pool = self._create_pool()
+
+        sel = self.pool.select(package_name, solv.Selection.SELECTION_NAME)
+        recommends = []
+
+        for s in sel.solvables():
+            for dep in s.lookup_deparray(solv.SOLVABLE_RECOMMENDS):
+                dep_str = str(dep)
+                recommends.append(dep_str)
+            break  # Just first match
+
+        return recommends
+
+    def get_package_suggests(self, package_name: str) -> List[str]:
+        """Get the suggests of a package.
+
+        Args:
+            package_name: The package name
+
+        Returns:
+            List of capability strings that the package suggests
+        """
+        if self.pool is None:
+            self.pool = self._create_pool()
+
+        sel = self.pool.select(package_name, solv.Selection.SELECTION_NAME)
+        suggests = []
+
+        for s in sel.solvables():
+            for dep in s.lookup_deparray(solv.SOLVABLE_SUGGESTS):
+                dep_str = str(dep)
+                suggests.append(dep_str)
+            break  # Just first match
+
+        return suggests
+
     def _get_versioned_requires(self, solvable) -> Dict[str, str]:
         """Extract versioned requires from a solvable as {capability: version}.
 

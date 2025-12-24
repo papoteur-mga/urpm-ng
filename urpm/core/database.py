@@ -742,11 +742,37 @@ class PackageDatabase:
         """, (capability, limit))
         
         return [dict(row) for row in cursor]
-    
+
+    def whatrecommends(self, capability: str, limit: int = 50) -> List[Dict]:
+        """Find packages that recommend a capability."""
+        cursor = self.conn.execute("""
+            SELECT p.id, p.name, p.version, p.release, p.arch, p.nevra
+            FROM packages p
+            JOIN recommends r ON r.pkg_id = p.id
+            WHERE r.capability = ?
+            ORDER BY p.name_lower
+            LIMIT ?
+        """, (capability, limit))
+
+        return [dict(row) for row in cursor]
+
+    def whatsuggests(self, capability: str, limit: int = 50) -> List[Dict]:
+        """Find packages that suggest a capability."""
+        cursor = self.conn.execute("""
+            SELECT p.id, p.name, p.version, p.release, p.arch, p.nevra
+            FROM packages p
+            JOIN suggests s ON s.pkg_id = p.id
+            WHERE s.capability = ?
+            ORDER BY p.name_lower
+            LIMIT ?
+        """, (capability, limit))
+
+        return [dict(row) for row in cursor]
+
     # =========================================================================
     # Statistics
     # =========================================================================
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
         stats = {}

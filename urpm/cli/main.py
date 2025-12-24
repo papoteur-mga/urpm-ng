@@ -452,7 +452,59 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Show all reverse dependencies recursively (flat list)'
     )
-    
+
+    # =========================================================================
+    # recommends
+    # =========================================================================
+    recommends_parser = subparsers.add_parser(
+        'recommends',
+        help='Show packages recommended by a package',
+        parents=[display_parent]
+    )
+    recommends_parser.add_argument(
+        'package',
+        help='Package name'
+    )
+
+    # =========================================================================
+    # whatrecommends
+    # =========================================================================
+    whatrecommends_parser = subparsers.add_parser(
+        'whatrecommends',
+        help='Show packages that recommend a package',
+        parents=[display_parent]
+    )
+    whatrecommends_parser.add_argument(
+        'package',
+        help='Package name'
+    )
+
+    # =========================================================================
+    # suggests
+    # =========================================================================
+    suggests_parser = subparsers.add_parser(
+        'suggests',
+        help='Show packages suggested by a package',
+        parents=[display_parent]
+    )
+    suggests_parser.add_argument(
+        'package',
+        help='Package name'
+    )
+
+    # =========================================================================
+    # whatsuggests
+    # =========================================================================
+    whatsuggests_parser = subparsers.add_parser(
+        'whatsuggests',
+        help='Show packages that suggest a package',
+        parents=[display_parent]
+    )
+    whatsuggests_parser.add_argument(
+        'package',
+        help='Package name'
+    )
+
     # =========================================================================
     # update / u
     # =========================================================================
@@ -7047,6 +7099,156 @@ def _print_rdep_tree(rdeps: list, get_rdeps, visited: set, prefix: str, max_dept
             print(f"{prefix}{connector}{pkg_name}")
 
 
+def cmd_recommends(args, db: PackageDatabase) -> int:
+    """Handle recommends command - show packages recommended by a package."""
+    from ..core.resolver import Resolver
+
+    package = args.package
+    pkg_name = _extract_pkg_name(package)
+
+    resolver = Resolver(db)
+    recommends = resolver.get_package_recommends(pkg_name)
+
+    if not recommends:
+        print(f"{package}: no recommends")
+        return 0
+
+    print(f"Packages recommended by {package}: {len(recommends)}\n")
+    for rec in sorted(recommends):
+        # Get providers for this capability
+        providers = resolver.get_providers(rec.split()[0], include_installed=True)
+        if providers:
+            print(f"  {rec} -> {', '.join(providers[:3])}")
+        else:
+            print(f"  {rec}")
+
+    return 0
+
+
+def cmd_whatrecommends(args, db: PackageDatabase) -> int:
+    """Handle whatrecommends command - show packages that recommend a package."""
+    package = args.package
+    pkg_name = _extract_pkg_name(package)
+
+    # Get what this package provides
+    pkg = db.get_package(pkg_name)
+    provides = [pkg_name]
+    if pkg and pkg.get('provides'):
+        for prov in pkg['provides']:
+            cap = prov.split('[')[0].strip()
+            if cap not in provides:
+                provides.append(cap)
+
+    results = set()
+
+    # Check database for each provide
+    for cap in provides:
+        for r in db.whatrecommends(cap, limit=200):
+            results.add(r['name'])
+
+    # Also check installed packages via rpm
+    try:
+        import rpm
+        ts = rpm.TransactionSet()
+        for hdr in ts.dbMatch():
+            name = hdr[rpm.RPMTAG_NAME]
+            if name == pkg_name or name == 'gpg-pubkey':
+                continue
+            recs = hdr[rpm.RPMTAG_RECOMMENDNAME] or []
+            for rec in recs:
+                rec_base = rec.split('(')[0].split()[0]
+                if rec_base in provides or rec in provides:
+                    results.add(name)
+                    break
+    except ImportError:
+        pass
+
+    if not results:
+        print(f"No package recommends '{package}'")
+        return 0
+
+    print(f"Packages that recommend {package}: {len(results)}\n")
+    for name in sorted(results):
+        print(f"  {name}")
+
+    return 0
+
+
+def cmd_suggests(args, db: PackageDatabase) -> int:
+    """Handle suggests command - show packages suggested by a package."""
+    from ..core.resolver import Resolver
+
+    package = args.package
+    pkg_name = _extract_pkg_name(package)
+
+    resolver = Resolver(db)
+    suggests = resolver.get_package_suggests(pkg_name)
+
+    if not suggests:
+        print(f"{package}: no suggests")
+        return 0
+
+    print(f"Packages suggested by {package}: {len(suggests)}\n")
+    for sug in sorted(suggests):
+        # Get providers for this capability
+        providers = resolver.get_providers(sug.split()[0], include_installed=True)
+        if providers:
+            print(f"  {sug} -> {', '.join(providers[:3])}")
+        else:
+            print(f"  {sug}")
+
+    return 0
+
+
+def cmd_whatsuggests(args, db: PackageDatabase) -> int:
+    """Handle whatsuggests command - show packages that suggest a package."""
+    package = args.package
+    pkg_name = _extract_pkg_name(package)
+
+    # Get what this package provides
+    pkg = db.get_package(pkg_name)
+    provides = [pkg_name]
+    if pkg and pkg.get('provides'):
+        for prov in pkg['provides']:
+            cap = prov.split('[')[0].strip()
+            if cap not in provides:
+                provides.append(cap)
+
+    results = set()
+
+    # Check database for each provide
+    for cap in provides:
+        for r in db.whatsuggests(cap, limit=200):
+            results.add(r['name'])
+
+    # Also check installed packages via rpm
+    try:
+        import rpm
+        ts = rpm.TransactionSet()
+        for hdr in ts.dbMatch():
+            name = hdr[rpm.RPMTAG_NAME]
+            if name == pkg_name or name == 'gpg-pubkey':
+                continue
+            sugs = hdr[rpm.RPMTAG_SUGGESTNAME] or []
+            for sug in sugs:
+                sug_base = sug.split('(')[0].split()[0]
+                if sug_base in provides or sug in provides:
+                    results.add(name)
+                    break
+    except ImportError:
+        pass
+
+    if not results:
+        print(f"No package suggests '{package}'")
+        return 0
+
+    print(f"Packages that suggest {package}: {len(results)}\n")
+    for name in sorted(results):
+        print(f"  {name}")
+
+    return 0
+
+
 def cmd_not_implemented(args, db: PackageDatabase) -> int:
     """Placeholder for not yet implemented commands."""
     print(f"Command '{args.command}' not yet implemented")
@@ -7175,6 +7377,18 @@ def main(argv=None) -> int:
 
         elif args.command in ('rdepends', 'rd'):
             return cmd_rdepends(args, db)
+
+        elif args.command == 'recommends':
+            return cmd_recommends(args, db)
+
+        elif args.command == 'whatrecommends':
+            return cmd_whatrecommends(args, db)
+
+        elif args.command == 'suggests':
+            return cmd_suggests(args, db)
+
+        elif args.command == 'whatsuggests':
+            return cmd_whatsuggests(args, db)
 
         elif args.command in ('config', 'cfg'):
             return cmd_config(args)
