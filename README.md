@@ -251,6 +251,15 @@ Example with preferences:
 urpm depends phpmyadmin --prefer=php:8.4
 ```
 
+### Weak dependencies
+
+```bash
+urpm recommends <package>     # Show packages recommended by a package
+urpm whatrecommends <package> # Show packages that recommend a package
+urpm suggests <package>       # Show packages suggested by a package
+urpm whatsuggests <package>   # Show packages that suggest a package
+```
+
 ### File queries
 
 ```bash
