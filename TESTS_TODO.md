@@ -109,3 +109,29 @@ Créer un dépôt de paquets RPM factices couvrant tous les cas :
   - [ ] Tests unitaires : parsing, resolver, database
   - [ ] Tests d'intégration : install/erase/upgrade end-to-end
   - [ ] CI GitHub Actions pour lancer les tests automatiquement
+
+
+## Ideas / Future Features (P3)
+
+### Unavailable packages reporting to community
+
+**Priority: Low**
+
+Implement anonymous reporting of unavailable packages to help Mageia maintainers identify:
+- Packages that users still have installed but are no longer in repos
+- Potential missing packages that should be rebuilt/updated
+- Usage patterns of deprecated packages
+
+**Implementation ideas:**
+- `urpm q --unavailable --report` : one-shot manual report
+- urpmd scheduled task: periodic automatic reporting (opt-in)
+- Config option: `urpm config reporting enable/disable`
+- Privacy: only send package names, not user info
+
+**Server side (separate project):**
+- Simple REST API to receive reports
+- Aggregate statistics per package
+- Dashboard for maintainers
+- Integration with Mageia QA tools
+
+**Note:** Requires community webservice infrastructure.
