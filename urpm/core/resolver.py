@@ -1846,9 +1846,11 @@ class Resolver:
                 for line in unrequested_file.read_text().splitlines():
                     line = line.strip()
                     if line and not line.startswith('#'):
-                        # Remove any trailing comments like " (reason)"
-                        name = line.split()[0] if ' ' in line else line
-                        unrequested.add(name.lower())  # Normalize to lowercase
+                        # Remove any trailing comments like " (reason)" or "\t(reason)"
+                        # split() without args handles all whitespace (spaces, tabs, etc.)
+                        parts = line.split()
+                        if parts:
+                            unrequested.add(parts[0].lower())  # Normalize to lowercase
             except (IOError, OSError):
                 pass
 

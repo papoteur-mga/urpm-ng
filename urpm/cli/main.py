@@ -7067,27 +7067,27 @@ def _print_dep_tree_legacy(db: PackageDatabase, by_provider: dict, find_provider
 def _is_virtual_provide(provide: str) -> bool:
     """Check if a provide is a virtual/generic capability that shouldn't be used for rdeps.
 
-    These are capabilities provided by many packages that don't represent
-    a real dependency on a specific package (fonts, applications, configs, etc.)
+    Only filter truly generic provides that many unrelated packages share.
+    Be careful NOT to filter specific provides like pkgconfig(xxx), cmake(xxx), etc.
     """
-    # Provides that start with these patterns are virtual
-    virtual_prefixes = (
-        'font(',           # font(:lang=XX), font(name)
-        'application(',    # application(foo.desktop)
-        'config(',         # config(pkgname)
-        'rpmlib(',         # rpmlib features
-        'pkgconfig(',      # pkgconfig provides - usually want the package name
-        'cmake(',          # cmake modules
-        'perl(',           # perl modules - ambiguous
-        'python',          # python modules - check below
-        'mimehandler(',    # mime handlers
-        'debuginfo(',      # debuginfo
-    )
+    prov = provide.strip()
 
-    prov_lower = provide.lower()
-    for prefix in virtual_prefixes:
-        if prov_lower.startswith(prefix):
-            return True
+    # rpmlib(...) - internal RPM capabilities, always ignore
+    if prov.startswith('rpmlib('):
+        return True
+
+    # font(:lang=XX) - generic language support, many packages provide same
+    # But font(SpecificFontName) is specific, keep it
+    if prov.startswith('font(:lang='):
+        return True
+
+    # Empty provides like "application()" with no content
+    if prov.endswith('()'):
+        return True
+
+    # config(pkgname) = version - RPM config file tracking, not a real dep
+    if prov.startswith('config('):
+        return True
 
     return False
 
@@ -7438,17 +7438,25 @@ def cmd_why(args, db: PackageDatabase) -> int:
 
     # Package is auto-installed - find the dependency chain to an explicit package
     # Build reverse dependency map (two passes needed)
+    # Dependency types: 'R' = Requires, 'r' = Recommends, 's' = Suggests
+    # Priority: R > r > s (requires is strongest)
+    DEP_PRIORITY = {'R': 3, 'r': 2, 's': 1}
+
     ts = rpm.TransactionSet()
     provides_map = {}  # capability -> set of package names
-    reverse_deps = {}  # name -> set of names that require it
-    pkg_requires = {}  # name -> list of requires
-    pkg_recommends = {}  # name -> list of recommends
+    reverse_deps = {}  # provider -> {requirer: dep_type}
+    pkg_deps = {}  # name -> {'R': [...], 'r': [...], 's': [...]}
 
-    # First pass: build provides_map and collect requires/recommends
+    # First pass: build provides_map and collect all dependency types
     for hdr in ts.dbMatch():
         name = hdr[rpm.RPMTAG_NAME]
         if name == 'gpg-pubkey':
             continue
+
+        # Always add package name to provides_map
+        if name not in provides_map:
+            provides_map[name] = set()
+        provides_map[name].add(name)
 
         # Record what this package provides
         provides = hdr[rpm.RPMTAG_PROVIDENAME] or []
@@ -7460,64 +7468,77 @@ def cmd_why(args, db: PackageDatabase) -> int:
             if prov not in provides_map:
                 provides_map[prov] = set()
             provides_map[prov].add(name)
-            # Also add package name itself
-            if name not in provides_map:
-                provides_map[name] = set()
-            provides_map[name].add(name)
 
-        # Store requires for second pass
+        # Collect all dependency types
         requires = hdr[rpm.RPMTAG_REQUIRENAME] or []
-        pkg_requires[name] = [r for r in requires
-                              if not r.startswith('rpmlib(') and not r.startswith('/')
-                              and not _is_virtual_provide(r)]
-
-        # Store recommends for second pass
         recommends = hdr[rpm.RPMTAG_RECOMMENDNAME] or []
-        pkg_recommends[name] = [r for r in recommends if not _is_virtual_provide(r)]
+        suggests = hdr[rpm.RPMTAG_SUGGESTNAME] or []
 
-    # Second pass: build reverse_deps using complete provides_map
-    for name, requires in pkg_requires.items():
-        for req in requires:
-            # Try exact match first, then base name without version constraints
-            providers = provides_map.get(req, set())
-            if not providers:
-                # Strip version constraint: "foo >= 1.0" -> "foo"
-                req_base = req.split()[0] if ' ' in req else req
-                providers = provides_map.get(req_base, set())
-            for provider in providers:
-                if provider not in reverse_deps:
-                    reverse_deps[provider] = set()
-                reverse_deps[provider].add(name)
+        pkg_deps[name] = {
+            'R': [r for r in requires
+                  if not r.startswith('rpmlib(') and not r.startswith('/')
+                  and not _is_virtual_provide(r)],
+            'r': [r for r in recommends if not _is_virtual_provide(r)],
+            's': [r for r in suggests if not _is_virtual_provide(r)]
+        }
 
-    # Also add recommends as reverse deps
-    for name, recommends in pkg_recommends.items():
-        for rec in recommends:
-            # Try exact match first, then base name without version constraints
-            providers = provides_map.get(rec, set())
-            if not providers:
-                rec_base = rec.split()[0] if ' ' in rec else rec
-                providers = provides_map.get(rec_base, set())
-            for provider in providers:
-                if provider not in reverse_deps:
-                    reverse_deps[provider] = set()
-                reverse_deps[provider].add(name)
+    # Second pass: build reverse_deps with dependency type
+    def add_reverse_dep(provider: str, requirer: str, dep_type: str):
+        """Add reverse dep, keeping strongest type if already exists."""
+        if provider not in reverse_deps:
+            reverse_deps[provider] = {}
+        current = reverse_deps[provider].get(requirer)
+        if current is None or DEP_PRIORITY[dep_type] > DEP_PRIORITY[current]:
+            reverse_deps[provider][requirer] = dep_type
+
+    def find_providers(cap: str) -> set:
+        """Find providers for a capability."""
+        providers = provides_map.get(cap, set())
+        if not providers:
+            # Strip version constraint: "foo >= 1.0" -> "foo"
+            cap_base = cap.split()[0] if ' ' in cap else cap
+            providers = provides_map.get(cap_base, set())
+        return providers
+
+    for name, deps in pkg_deps.items():
+        for dep_type in ('R', 'r', 's'):
+            for cap in deps[dep_type]:
+                for provider in find_providers(cap):
+                    add_reverse_dep(provider, name, dep_type)
 
     # For each direct reverse dep, find the first explicit package in the chain
     from collections import deque
 
-    direct_rdeps = reverse_deps.get(pkg_name, set())
+    # Helper to format dependency type
+    DEP_LABELS = {'R': 'requires', 'r': 'recommends', 's': 'suggests'}
+    DEP_ARROWS = {'R': '─', 'r': '┄', 's': '┈'}  # solid, dashed, dotted
+
+    def format_dep_type(dep_type: str, short: bool = False) -> str:
+        """Format dependency type with color."""
+        if dep_type == 'R':
+            return colors.success('R') if short else colors.success('required')
+        elif dep_type == 'r':
+            return colors.info('r') if short else colors.info('recommended')
+        else:
+            return colors.dim('s') if short else colors.dim('suggested')
+
+    direct_rdeps = reverse_deps.get(pkg_name, {})
     if not direct_rdeps:
         print(f"{colors.bold(pkg_name)}: {colors.warning('orphan')} (nothing requires it)")
         print(f"\nThis package can be removed with: urpm autoremove --orphans")
         return 0
 
     # For each direct rdep, find path to first explicit
-    results = {}  # direct_rdep -> (explicit_pkg, path) or None if orphan branch
+    # Path elements: (pkg_name, dep_type_to_this_pkg)
+    results = {}  # direct_rdep -> (explicit_pkg, path, initial_dep_type) or None
 
-    for direct in direct_rdeps:
+    for direct, initial_dep_type in direct_rdeps.items():
         # BFS from this direct rdep to find first explicit
-        queue = deque([(direct, [direct])])
-        visited = {pkg_name, direct}
+        # Path stores: [(pkg, dep_type_used), ...]
+        queue = deque([(direct, [(direct, initial_dep_type)])])
+        # Don't block pkg_name - the path might legitimately go through other
+        # packages that also depend on pkg_name
+        visited = {direct}
         found_explicit = None
 
         while queue and not found_explicit:
@@ -7529,11 +7550,12 @@ def cmd_why(args, db: PackageDatabase) -> int:
                 break
 
             # Continue searching through auto packages
-            for requirer in reverse_deps.get(current, []):
+            rdeps_of_current = reverse_deps.get(current, {})
+            for requirer, dep_type in rdeps_of_current.items():
                 if requirer in visited:
                     continue
                 visited.add(requirer)
-                queue.append((requirer, path + [requirer]))
+                queue.append((requirer, path + [(requirer, dep_type)]))
 
         results[direct] = found_explicit
 
@@ -7553,28 +7575,61 @@ def cmd_why(args, db: PackageDatabase) -> int:
             by_explicit[explicit] = []
         by_explicit[explicit].append((direct, path))
 
-    print(f"{colors.bold(pkg_name)}: installed as dependency")
-    print(f"\nRequired by {colors.success(str(len(by_explicit)))} explicit package(s):\n")
+    # Count by dependency type for summary
+    dep_type_counts = {'R': 0, 'r': 0, 's': 0}
+    for entries in by_explicit.values():
+        # Use first dep type in shortest path
+        entries.sort(key=lambda x: len(x[1]))
+        _, path = entries[0]
+        dep_type_counts[path[0][1]] += 1
 
-    for explicit_pkg in sorted(by_explicit.keys()):
+    print(f"{colors.bold(pkg_name)}: installed as dependency")
+
+    # Summary line
+    summary_parts = []
+    if dep_type_counts['R']:
+        summary_parts.append(f"{colors.success(str(dep_type_counts['R']))} required")
+    if dep_type_counts['r']:
+        summary_parts.append(f"{colors.info(str(dep_type_counts['r']))} recommended")
+    if dep_type_counts['s']:
+        summary_parts.append(f"{colors.dim(str(dep_type_counts['s']))} suggested")
+    print(f"\nBy {', '.join(summary_parts)} explicit package(s):\n")
+
+    # Sort explicit packages by: requires first, then recommends, then suggests
+    def sort_key(pkg):
+        entries = by_explicit[pkg]
+        entries.sort(key=lambda x: len(x[1]))
+        _, path = entries[0]
+        return (-DEP_PRIORITY[path[0][1]], pkg)  # negative for descending
+
+    for explicit_pkg in sorted(by_explicit.keys(), key=sort_key):
         entries = by_explicit[explicit_pkg]
         # Use shortest path
         entries.sort(key=lambda x: len(x[1]))
         direct, path = entries[0]
 
+        # Get the dependency type from explicit_pkg to the chain
+        first_dep_type = path[-1][1] if path else 'R'
+        dep_marker = format_dep_type(first_dep_type, short=True)
+
         if len(path) == 1:
             # Direct dependency
-            print(f"  {colors.success(explicit_pkg)}")
+            print(f"  [{dep_marker}] {colors.success(explicit_pkg)}")
         else:
-            # Indirect - show chain
-            chain = " → ".join(path[:-1])
-            print(f"  {colors.success(explicit_pkg)} (via {colors.dim(chain)})")
+            # Indirect - show chain with types
+            chain_parts = []
+            for pkg, dt in path[:-1]:
+                arrow = DEP_ARROWS[dt]
+                chain_parts.append(f"{pkg}")
+            chain = f" {DEP_ARROWS[path[0][1]]}→ ".join(chain_parts)
+            print(f"  [{dep_marker}] {colors.success(explicit_pkg)} (via {colors.dim(chain)})")
 
     # Show orphan branches if any
     if orphan_branches:
-        print(f"\n{colors.dim('Also required by (orphan branches):')}")
+        print(f"\n{colors.dim('Also depended on by (orphan branches):')}")
         for branch in sorted(orphan_branches)[:5]:
-            print(f"  {colors.dim(branch)}")
+            dep_type = direct_rdeps.get(branch, 'R')
+            print(f"  [{format_dep_type(dep_type, short=True)}] {colors.dim(branch)}")
         if len(orphan_branches) > 5:
             print(f"  {colors.dim(f'... and {len(orphan_branches) - 5} more')}")
 
