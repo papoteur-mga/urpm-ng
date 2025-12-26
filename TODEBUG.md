@@ -36,6 +36,18 @@ Documentation mise à jour pour :
 - Commandes server
 - ip_mode IPv4/IPv6
 
+### Souci à l'upgrade - CORRIGÉ
+Les orphans sont maintenant gérés correctement avec la queue de transactions.
+
+### Dépendances phpmyadmin - CORRIGÉ
+`./bin/urpm depends phpmyadmin` affiche maintenant les alternatives correctement.
+
+### Pre-downloading - FONCTIONNEL
+Le pre-downloading fonctionne via urpmd scheduler.
+
+### Souci d'alignement dans urpm h - CORRIGÉ
+Les entêtes sont maintenant alignées avec les données.
+
 ---
 
 ## En cours / À faire
@@ -46,39 +58,12 @@ Contrairement à `rdepends --hide-uninstalled` qui pré-construit le graphe en u
 
 **TODO** : utiliser `_build_rdeps_graph()` pour `why` aussi.
 
-### Souci à l'upgrade
-Pour les upgrades quand y'a des orphans à enlever, faut quand même attendre la mise à jour de la rpmdb.
-=> petit souci de cohérence => faut mettre les erase en queue.
-
-Et l'affichage des erreurs en JSON c'est moche (prévoir mode batch).
-
-### Dépendances phpmyadmin
-`./bin/urpm depends phpmyadmin` n'affiche rien.
-
-Cause probable : ne liste que des requires qui ne sont pas des paquets mais des provides virtuels.
-=> Il faudra afficher les alternatives intelligemment (couleurs ?) et les "blocs de dépendances croisées".
-
-### Pre-downloading
-Pas encore vu passer un seul predownload... à vérifier que ça marche.
-
-Idées complémentaires à discuter :
-- S'il y a plusieurs peers => élection d'un master qui répartit les tâches de prédownloads ?
-- Faire en sorte qu'un paquet prédownloadé soit sur au moins deux peers au cas où un soit éteint ?
-- Détecter quand un peer passe offline et récupérer upstream les prédownloads qui étaient chez lui ?
-
-Objectifs :
-1. Ne pas faire 50 prédownloads de chaque fichier s'il y a 50 peers
-2. Si un peer est éteint, ne pas avoir à tous télécharger le complément sur le miroir upstream
-
 ### Fix dep (bootstrap)
 Quand python3-solv ou python3-zstandard ne sont pas installés, proposer de les installer :
 - soit en DL direct
 - soit via urpmi
 
 Et bien les mettre dans installed-through-deps.list.
-
-### Souci d'alignement dans urpm h
-La colonne Action n'est pas assez large et les titres sont mal alignés.
 
 ### Gestion du cache - Quotas
 Le nettoyage basique (fichiers > 30 jours) n'est pas forcément adapté.

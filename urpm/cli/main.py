@@ -5623,7 +5623,7 @@ def cmd_history(args, db: PackageDatabase) -> int:
         print(colors.info("No transaction history"))
         return 0
 
-    print(f"\n{colors.bold('ID'):>4} | {colors.bold('Date'):10} | {colors.bold('Action'):8} | {colors.bold('Status'):11} | {colors.bold('Packages')}")
+    print(f"\n{colors.bold('  ID')} | {colors.bold('Date      ')} | {colors.bold('Action  ')} | {colors.bold('Status     ')} | {colors.bold('Packages')}")
     print("-" * 70)
 
     for h in history:
