@@ -18,6 +18,8 @@ except ImportError:
     HAS_RPM = False
 
 from .database import PackageDatabase
+from .config import get_media_local_path, get_base_dir
+from .compression import decompress_stream
 
 
 # Debug flag for resolver - set to True to enable debug output
@@ -157,19 +159,33 @@ class Resolver:
         self._installed_count = 0  # Number of installed packages loaded
 
     def _create_pool(self) -> solv.Pool:
-        """Create and populate libsolv Pool from database."""
+        """Create and populate libsolv Pool from database.
+
+        Uses native libsolv methods for optimal performance:
+        - add_rpmdb() for installed packages
+        - add_mdk() for loading synthesis files directly
+        """
+        import tempfile
+
         pool = solv.Pool()
         pool.setdisttype(solv.Pool.DISTTYPE_RPM)
         pool.setarch(self.arch)
 
-        # Load installed packages from rpmdb
+        # Load installed packages from rpmdb using native method
         installed = pool.add_repo("@System")
         installed.appdata = {"type": "installed"}
         pool.installed = installed
-        self._installed_count = self._load_rpmdb(pool, installed)
 
-        # Load available packages from each media
+        if HAS_RPM:
+            installed.add_rpmdb()
+            self._installed_count = installed.nsolvables
+        else:
+            self._installed_count = 0
+
+        # Load available packages from synthesis files (much faster than SQLite)
+        base_dir = get_base_dir()
         media_list = self.db.list_media()
+
         for media in media_list:
             if not media['enabled']:
                 continue
@@ -177,7 +193,32 @@ class Resolver:
             repo = pool.add_repo(media['name'])
             repo.appdata = {"type": "available", "media": media}
 
-            self._load_repo_packages(pool, repo, media['id'])
+            # Try to load from synthesis file first
+            media_path = get_media_local_path(media, base_dir)
+            synthesis_path = media_path / "media_info" / "synthesis.hdlist.cz"
+
+            if synthesis_path.exists():
+                try:
+                    # Decompress and load with add_mdk
+                    stream = decompress_stream(synthesis_path)
+                    data = stream.read()
+
+                    with tempfile.NamedTemporaryFile(suffix='.hdlist', delete=False) as tmp:
+                        tmp.write(data)
+                        tmp_path = tmp.name
+
+                    f = solv.xfopen(tmp_path)
+                    repo.add_mdk(f)
+                    f.close()
+                    Path(tmp_path).unlink()
+                except Exception as e:
+                    if DEBUG_RESOLVER:
+                        print(f"[RESOLVER] Failed to load synthesis for {media['name']}: {e}")
+                    # Fallback to SQLite loading
+                    self._load_repo_packages(pool, repo, media['id'])
+            else:
+                # No synthesis file, fallback to SQLite
+                self._load_repo_packages(pool, repo, media['id'])
 
         pool.createwhatprovides()
         return pool
