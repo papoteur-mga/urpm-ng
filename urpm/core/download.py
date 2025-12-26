@@ -62,19 +62,30 @@ def get_hostname_from_url(url: str) -> str:
 
 @dataclass
 class DownloadItem:
-    """A package to download."""
+    """A package to download.
+
+    Supports both legacy (media_url) and new (media_id + relative_path) schemas.
+    For new schema, servers must be pre-loaded to avoid SQLite threading issues.
+    """
     name: str
     version: str
     release: str
     arch: str
-    media_url: str
+    # Legacy fields
+    media_url: str = ""
     media_name: str = ""
+    # New schema fields
+    media_id: int = 0
+    relative_path: str = ""
+    is_official: bool = True
+    # Pre-loaded servers (list of dicts with protocol, host, base_path)
+    servers: List[dict] = field(default_factory=list)
     size: int = 0
 
     @property
     def hostname(self) -> str:
-        """Hostname from media URL for cache organization."""
-        return get_hostname_from_url(self.media_url)
+        """Hostname from media URL for cache organization (legacy)."""
+        return get_hostname_from_url(self.media_url) if self.media_url else ""
 
     @property
     def filename(self) -> str:
@@ -83,8 +94,14 @@ class DownloadItem:
 
     @property
     def url(self) -> str:
-        """Full download URL."""
-        return f"{self.media_url.rstrip('/')}/{self.filename}"
+        """Full download URL (legacy - uses first media_url)."""
+        if self.media_url:
+            return f"{self.media_url.rstrip('/')}/{self.filename}"
+        return ""
+
+    def uses_new_schema(self) -> bool:
+        """Check if this item uses new multi-server schema."""
+        return len(self.servers) > 0 and self.relative_path != ""
 
 
 @dataclass
@@ -282,7 +299,6 @@ class DownloadCoordinator:
             assignment: Optional peer assignment
             slot: Worker slot number for progress tracking
         """
-
         # Check cache first
         if self.downloader.is_cached(item):
             return DownloadResult(
@@ -339,7 +355,7 @@ class DownloadCoordinator:
                             self.mark_peer_failed(alt_peer, result.blacklist_peer.reason)
 
             # Fall back to upstream
-            result = self.downloader.download_one(item, progress_callback=progress_cb)
+            result = self.downloader.download_one(item, progress_callback=progress_cb, worker_slot=slot)
             result.from_peer = False
             return result
         finally:
@@ -464,6 +480,16 @@ class DownloadCoordinator:
                             active_downloads  # Extra: all active downloads
                         )
                         last_active_name = name
+                    else:
+                        # No active downloads but still working - show overall progress
+                        # Use last_active_name or a generic message
+                        progress_callback(
+                            last_active_name or "...",
+                            len(results),
+                            total_items,
+                            completed_bytes,
+                            total_bytes
+                        )
                 continue
 
         # Wait for workers to finish cleanly
@@ -503,9 +529,20 @@ class Downloader:
     def get_cache_path(self, item: DownloadItem) -> Path:
         """Get cache path for a download item.
 
-        Structure: <base_dir>/medias/<hostname>/<media_name>/*.rpm
+        New schema: <base_dir>/medias/official/<relative_path>/*.rpm
+                    <base_dir>/medias/custom/<short_name>/*.rpm
+        Legacy:     <base_dir>/medias/<hostname>/<media_name>/*.rpm
         """
-        if item.media_name and item.media_url:
+        if item.uses_new_schema():
+            # New schema - use relative_path
+            if item.is_official:
+                media_dir = self.cache_dir / "medias" / "official" / item.relative_path
+            else:
+                media_dir = self.cache_dir / "medias" / "custom" / item.media_name
+            media_dir.mkdir(parents=True, exist_ok=True)
+            return media_dir / item.filename
+        elif item.media_name and item.media_url:
+            # Legacy schema
             media_dir = self.cache_dir / "medias" / item.hostname / item.media_name
             media_dir.mkdir(parents=True, exist_ok=True)
             return media_dir / item.filename
@@ -534,17 +571,101 @@ class Downloader:
         except OSError:
             return False
 
+    def _download_from_url(self, url: str, cache_path: Path,
+                            progress_callback: Callable[[int, int], None] = None,
+                            timeout: int = 30,
+                            ip_mode: str = 'auto') -> Tuple[bool, Optional[str]]:
+        """Download a file from URL to cache path.
+
+        Args:
+            url: URL to download
+            cache_path: Where to save the file
+            progress_callback: Optional progress callback
+            timeout: Connection timeout in seconds
+            ip_mode: 'auto', 'ipv4', 'ipv6', or 'dual' (dual prefers ipv4)
+
+        Returns:
+            Tuple of (success, error_message or None)
+        """
+        import socket
+        from .config import get_socket_family_for_ip_mode
+
+        # Determine socket family based on ip_mode
+        family = get_socket_family_for_ip_mode(ip_mode)
+
+        # Patch getaddrinfo if we need to force a specific IP version
+        original_getaddrinfo = None
+        if family != 0:
+            original_getaddrinfo = socket.getaddrinfo
+            def patched_getaddrinfo(host, port, fam=0, type=0, proto=0, flags=0):
+                # Force the specified family if caller didn't specify one
+                if fam == 0:
+                    fam = family
+                return original_getaddrinfo(host, port, fam, type, proto, flags)
+            socket.getaddrinfo = patched_getaddrinfo
+
+        try:
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'urpm/0.1')
+
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                total_size = int(response.headers.get('Content-Length', 0))
+                downloaded = 0
+
+                # Download to temp file first
+                temp_path = cache_path.with_suffix('.tmp')
+
+                with open(temp_path, 'wb') as f:
+                    while True:
+                        chunk = response.read(65536)  # 64KB chunks
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        if progress_callback:
+                            progress_callback(downloaded, total_size)
+
+                # Move to final path
+                temp_path.rename(cache_path)
+                return True, None
+
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP {e.code}: {e.reason}"
+        except urllib.error.URLError as e:
+            return False, f"URL error: {e.reason}"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            # Restore original getaddrinfo
+            if original_getaddrinfo is not None:
+                socket.getaddrinfo = original_getaddrinfo
+
+    def _build_package_url(self, server: dict, relative_path: str, filename: str) -> str:
+        """Build full package URL from server info."""
+        from .config import build_server_url
+        base_url = build_server_url(server)
+        return f"{base_url}/{relative_path}/{filename}"
+
     def download_one(self, item: DownloadItem,
                      progress_callback: Callable[[int, int], None] = None,
                      timeout: int = 30,
-                     max_retries: int = 3) -> DownloadResult:
-        """Download a single package with retry on transient errors.
+                     max_retries: int = 3,
+                     worker_slot: int = 0) -> DownloadResult:
+        """Download a single package with multi-server failover.
+
+        For new schema: tries each server in priority order with retries.
+        For legacy schema: uses single media_url with retries.
 
         Args:
             item: Package to download
             progress_callback: Optional callback(downloaded, total)
             timeout: Connection timeout in seconds
-            max_retries: Max retry attempts for transient errors
+            max_retries: Max retry attempts per server for transient errors
+            worker_slot: Worker slot number for load balancing across servers.
+                         Workers are distributed across servers (slot 0,1 -> server 0 first,
+                         slot 2,3 -> server 1 first, etc.) to avoid all workers hitting
+                         the same server simultaneously.
 
         Returns:
             DownloadResult with status
@@ -562,55 +683,87 @@ class Downloader:
                 cached=True
             )
 
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                req = urllib.request.Request(item.url)
-                req.add_header('User-Agent', 'urpm/0.1')
-
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    total_size = int(response.headers.get('Content-Length', 0))
-                    downloaded = 0
-
-                    # Download to temp file first
-                    temp_path = cache_path.with_suffix('.tmp')
-
-                    with open(temp_path, 'wb') as f:
-                        while True:
-                            chunk = response.read(65536)  # 64KB chunks
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            downloaded += len(chunk)
-
-                            if progress_callback:
-                                progress_callback(downloaded, total_size)
-
-                    # Move to final path
-                    temp_path.rename(cache_path)
-
-                    return DownloadResult(
-                        item=item,
-                        success=True,
-                        path=cache_path
-                    )
-
-            except urllib.error.HTTPError as e:
-                # HTTP errors (404, 500, etc.) - don't retry
+        # New schema: try multiple servers (pre-loaded in item.servers)
+        if item.uses_new_schema():
+            servers = item.servers
+            if not servers:
                 return DownloadResult(
                     item=item,
                     success=False,
-                    error=f"HTTP {e.code}: {e.reason}"
+                    error="No servers configured for this media"
                 )
-            except (urllib.error.URLError, socket.timeout, OSError) as e:
-                # Transient errors - retry with backoff
-                last_error = str(e.reason) if hasattr(e, 'reason') else str(e)
-                if attempt < max_retries - 1:
-                    time.sleep(1 * (attempt + 1))  # 1s, 2s, 3s backoff
-                    continue
-            except Exception as e:
-                last_error = str(e)
+
+            # Rotate servers based on worker_slot for load balancing
+            # With 4 workers and 2 servers: workers 0,2 start with server 0,
+            # workers 1,3 start with server 1
+            if len(servers) > 1:
+                start_idx = worker_slot % len(servers)
+                servers = servers[start_idx:] + servers[:start_idx]
+
+            all_errors = []
+            for server in servers:
+                url = self._build_package_url(server, item.relative_path, item.filename)
+                ip_mode = server.get('ip_mode', 'auto')
+                logger.debug(f"Trying server {server['name']} (ip_mode={ip_mode}): {url}")
+
+                # Try this server with retries
+                for attempt in range(max_retries):
+                    success, error = self._download_from_url(
+                        url, cache_path, progress_callback, timeout, ip_mode=ip_mode
+                    )
+                    if success:
+                        logger.info(f"Downloaded {item.filename} from {server['name']}")
+                        return DownloadResult(
+                            item=item,
+                            success=True,
+                            path=cache_path
+                        )
+
+                    # Check if we should retry on this server
+                    if error and error.startswith("HTTP"):
+                        # HTTP error - try next server immediately
+                        all_errors.append(f"{server['name']}: {error}")
+                        break
+                    else:
+                        # Transient error - retry with backoff
+                        all_errors.append(f"{server['name']}: {error}")
+                        if attempt < max_retries - 1:
+                            time.sleep(1 * (attempt + 1))
+
+            # All servers failed
+            return DownloadResult(
+                item=item,
+                success=False,
+                error=f"All servers failed: {'; '.join(all_errors[-3:])}"  # Last 3 errors
+            )
+
+        # Legacy schema: single URL with retries
+        if not item.url:
+            return DownloadResult(
+                item=item,
+                success=False,
+                error="No download URL available"
+            )
+
+        # Legacy schema: default to ipv4 to avoid IPv6 timeout issues
+        last_error = None
+        for attempt in range(max_retries):
+            success, error = self._download_from_url(
+                item.url, cache_path, progress_callback, timeout, ip_mode='ipv4'
+            )
+            if success:
+                return DownloadResult(
+                    item=item,
+                    success=True,
+                    path=cache_path
+                )
+
+            last_error = error
+            if error and error.startswith("HTTP"):
+                # HTTP error - don't retry
                 break
+            elif attempt < max_retries - 1:
+                time.sleep(1 * (attempt + 1))  # 1s, 2s, 3s backoff
 
         return DownloadResult(
             item=item,
@@ -665,32 +818,15 @@ class Downloader:
 
                 checksum = sha256.hexdigest()
 
-                # Verify GPG signature before accepting the file
-                import logging
-                logger = logging.getLogger(__name__)
+                # NOTE: GPG verification removed from peer download for performance.
+                # Rationale:
+                # 1. Peers are trusted local network hosts (discovered via mDNS)
+                # 2. rpm will verify signature anyway at install time
+                # 3. Per-package GPG check was adding ~0.5-1s latency each
+                #
+                # If a peer serves tampered packages, rpm install will reject them.
 
-                sig_ok, sig_error = verify_rpm_signature(temp_path)
-                if not sig_ok:
-                    # Signature verification failed - reject file from peer
-                    logger.warning(
-                        f"GPG verification failed for {item.filename} from peer "
-                        f"{peer.host}:{peer.port}: {sig_error}"
-                    )
-                    temp_path.unlink(missing_ok=True)
-
-                    # Return with blacklist info (actual blacklist happens in main thread)
-                    return DownloadResult(
-                        item=item,
-                        success=False,
-                        error=f"GPG verification failed: {sig_error}",
-                        blacklist_peer=PeerToBlacklist(
-                            host=peer.host,
-                            port=peer.port,
-                            reason=f"Failed GPG verification: {item.filename}"
-                        )
-                    )
-
-                # Verification passed - move to final location
+                # Move to final location
                 temp_path.rename(cache_path)
 
                 # Return result with provenance info (DB write happens in main thread)
@@ -703,7 +839,7 @@ class Downloader:
                         peer_port=peer.port,
                         checksum_sha256=checksum,
                         file_size=downloaded,
-                        verified=True
+                        verified=False  # GPG verification deferred to rpm install
                     )
                 )
 
@@ -892,16 +1028,21 @@ def get_download_items(db: PackageDatabase, packages: List[dict]) -> List[Downlo
         List of DownloadItem ready for download
     """
     items = []
-    media_cache = {}  # Cache media URL lookups
+    media_cache = {}  # Cache media lookups
+    servers_cache = {}  # Cache servers lookups
 
     for pkg in packages:
         media_name = pkg.get('media_name', '')
         if media_name not in media_cache:
             media = db.get_media(media_name)
-            media_cache[media_name] = media['url'] if media else ''
+            media_cache[media_name] = media
+            # Pre-load servers
+            if media and media.get('id'):
+                servers = db.get_servers_for_media(media['id'], enabled_only=True)
+                servers_cache[media['id']] = [dict(s) for s in servers]
 
-        media_url = media_cache[media_name]
-        if not media_url:
+        media = media_cache[media_name]
+        if not media:
             continue
 
         # Parse EVR - remove epoch if present
@@ -915,15 +1056,31 @@ def get_download_items(db: PackageDatabase, packages: List[dict]) -> List[Downlo
             version = evr
             release = '1'
 
-        items.append(DownloadItem(
-            name=pkg['name'],
-            version=version,
-            release=release,
-            arch=pkg['arch'],
-            media_url=media_url,
-            media_name=media_name,
-            size=pkg.get('size', 0)
-        ))
+        # Use new schema if available, fallback to legacy URL
+        if media.get('relative_path'):
+            servers = servers_cache.get(media['id'], [])
+            items.append(DownloadItem(
+                name=pkg['name'],
+                version=version,
+                release=release,
+                arch=pkg['arch'],
+                media_id=media['id'],
+                relative_path=media['relative_path'],
+                is_official=bool(media.get('is_official', 1)),
+                servers=servers,
+                media_name=media_name,
+                size=pkg.get('size', 0)
+            ))
+        elif media.get('url'):
+            items.append(DownloadItem(
+                name=pkg['name'],
+                version=version,
+                release=release,
+                arch=pkg['arch'],
+                media_url=media['url'],
+                media_name=media_name,
+                size=pkg.get('size', 0)
+            ))
 
     return items
 

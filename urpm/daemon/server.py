@@ -6,7 +6,7 @@ import mimetypes
 import os
 import sys
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse, parse_qs, unquote
@@ -472,7 +472,9 @@ class UrpmdServer:
         # Set daemon reference on handler class
         UrpmdHandler.daemon = daemon
 
-        self.server = HTTPServer((self.host, self.port), UrpmdHandler)
+        # Use ThreadingHTTPServer for concurrent request handling
+        # This allows multiple parallel downloads from peers
+        self.server = ThreadingHTTPServer((self.host, self.port), UrpmdHandler)
         logger.info(f"urpmd HTTP server listening on {self.host}:{self.port}")
 
     def serve_forever(self):

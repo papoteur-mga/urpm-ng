@@ -330,7 +330,8 @@ class UrpmDaemon:
     def check_have_packages(self, packages: List[str]) -> Dict[str, Any]:
         """Check which packages are available in local cache.
 
-        Searches across all hostname/media directories for each filename.
+        Searches recursively for RPM files. Supports both old structure
+        (hostname/media/) and new structure (official/version/arch/...).
         The Mageia version is encoded in the filename (.mga10., .mga9., etc.)
         so packages won't be confused across versions.
 
@@ -353,38 +354,24 @@ class UrpmDaemon:
                 'missing_count': len(packages),
             }
 
+        # Build index of all available RPMs (filename -> relative path)
+        # This is more efficient when checking many packages
+        if not hasattr(self, '_rpm_index') or self._rpm_index is None:
+            self._build_rpm_index()
+
         for filename in packages:
             if not filename or not filename.endswith('.rpm'):
                 missing.append(filename or '<invalid>')
                 continue
 
-            # Search for file across all hostname/media directories
-            found = False
-            for hostname_dir in medias_dir.iterdir():
-                if not hostname_dir.is_dir():
-                    continue
-                for media_dir in hostname_dir.iterdir():
-                    if not media_dir.is_dir():
-                        continue
-                    file_path = media_dir / filename
-                    if file_path.exists() and file_path.is_file():
-                        try:
-                            size = file_path.stat().st_size
-                            # Path relative to /media/ endpoint
-                            rel_path = f"{hostname_dir.name}/{media_dir.name}/{filename}"
-                            available.append({
-                                'filename': filename,
-                                'size': size,
-                                'path': rel_path,
-                            })
-                            found = True
-                            break  # Found it, stop searching
-                        except OSError:
-                            continue
-                if found:
-                    break
-
-            if not found:
+            if filename in self._rpm_index:
+                info = self._rpm_index[filename]
+                available.append({
+                    'filename': filename,
+                    'size': info['size'],
+                    'path': info['path'],
+                })
+            else:
                 missing.append(filename)
 
         return {
@@ -393,6 +380,33 @@ class UrpmDaemon:
             'available_count': len(available),
             'missing_count': len(missing),
         }
+
+    def _build_rpm_index(self):
+        """Build index of all RPM files in medias directory."""
+        self._rpm_index = {}
+        medias_dir = self.base_dir / "medias"
+
+        if not medias_dir.exists():
+            return
+
+        # Recursively find all .rpm files
+        for rpm_path in medias_dir.rglob("*.rpm"):
+            if rpm_path.is_file():
+                try:
+                    filename = rpm_path.name
+                    size = rpm_path.stat().st_size
+                    # Path relative to medias/ for URL construction
+                    rel_path = str(rpm_path.relative_to(medias_dir))
+                    self._rpm_index[filename] = {
+                        'size': size,
+                        'path': rel_path,
+                    }
+                except OSError:
+                    continue
+
+    def invalidate_rpm_index(self):
+        """Invalidate the RPM index so it will be rebuilt on next check."""
+        self._rpm_index = None
 
 
 class ColoredFormatter(logging.Formatter):

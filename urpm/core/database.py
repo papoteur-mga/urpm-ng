@@ -7,12 +7,13 @@ of synthesis/hdlist files.
 
 import sqlite3
 import hashlib
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Iterator
 
 # Schema version - increment when schema changes
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 10
 
 # Extended schema with media, config, history tables
 SCHEMA = """
@@ -123,19 +124,60 @@ CREATE TABLE IF NOT EXISTS enhances (
 -- Media (repositories)
 CREATE TABLE IF NOT EXISTS media (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    url TEXT,
-    mirrorlist TEXT,
+    name TEXT NOT NULL UNIQUE,            -- Display name: 'Core Release', 'Nonfree Updates'
+    short_name TEXT NOT NULL,             -- Filesystem-safe: 'core_release', 'nonfree_updates'
+    mageia_version TEXT NOT NULL,         -- '9', '10', 'cauldron'
+    architecture TEXT NOT NULL,           -- 'x86_64', 'aarch64'
+    relative_path TEXT NOT NULL,          -- '9/x86_64/media/core/release'
+    is_official INTEGER DEFAULT 1,        -- 0 = custom media
+    allow_unsigned INTEGER DEFAULT 0,     -- 1 = skip signature check (custom only)
     enabled INTEGER DEFAULT 1,
     update_media INTEGER DEFAULT 0,
     priority INTEGER DEFAULT 50,
-    
+
     -- Sync state
     last_sync INTEGER,
     synthesis_md5 TEXT,
     hdlist_md5 TEXT,
-    
-    added_timestamp INTEGER
+
+    added_timestamp INTEGER,
+
+    -- Legacy (kept for migration, will be removed later)
+    url TEXT,
+    mirrorlist TEXT,
+
+    UNIQUE(mageia_version, architecture, short_name)
+);
+
+-- Servers (upstream mirrors or local)
+CREATE TABLE IF NOT EXISTS server (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,              -- Display name: 'mageia-official', 'distrib-coffee'
+    protocol TEXT NOT NULL DEFAULT 'https', -- 'http', 'https', 'file'
+    host TEXT NOT NULL,                     -- FQDN: 'mirrors.mageia.org', 'localhost' for file
+    base_path TEXT NOT NULL DEFAULT '',     -- '/mageia', '/pub/linux/Mageia', '/mirrors/mageia'
+    is_official INTEGER DEFAULT 1,          -- 0 = custom server
+    enabled INTEGER DEFAULT 1,
+    priority INTEGER DEFAULT 50,            -- Manual preference (V1: only sort criteria)
+    ip_mode TEXT DEFAULT 'auto',            -- 'auto', 'ipv4', 'ipv6', 'dual' (dual = prefer ipv4)
+    -- Qualimetry (post-V1, NULL for now)
+    latency_ms INTEGER,
+    bandwidth_kbps INTEGER,
+    failure_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    last_check INTEGER,
+    added_timestamp INTEGER,
+    UNIQUE(protocol, host, base_path)
+);
+
+-- N:M link between servers and media
+CREATE TABLE IF NOT EXISTS server_media (
+    server_id INTEGER NOT NULL,
+    media_id INTEGER NOT NULL,
+    added_timestamp INTEGER,
+    PRIMARY KEY (server_id, media_id),
+    FOREIGN KEY (server_id) REFERENCES server(id) ON DELETE CASCADE,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
 -- Transaction history
@@ -256,6 +298,59 @@ MIGRATIONS = {
             UNIQUE(peer_host, peer_port)
         );
     """),
+    7: (8, """
+        -- Migration v7 -> v8: Add server/server_media tables and extend media table
+
+        -- Add new columns to media table
+        ALTER TABLE media ADD COLUMN short_name TEXT;
+        ALTER TABLE media ADD COLUMN mageia_version TEXT;
+        ALTER TABLE media ADD COLUMN architecture TEXT;
+        ALTER TABLE media ADD COLUMN relative_path TEXT;
+        ALTER TABLE media ADD COLUMN is_official INTEGER DEFAULT 1;
+        ALTER TABLE media ADD COLUMN allow_unsigned INTEGER DEFAULT 0;
+
+        -- Create server table
+        CREATE TABLE IF NOT EXISTS server (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            protocol TEXT NOT NULL DEFAULT 'https',
+            host TEXT NOT NULL,
+            base_path TEXT NOT NULL DEFAULT '',
+            is_official INTEGER DEFAULT 1,
+            enabled INTEGER DEFAULT 1,
+            priority INTEGER DEFAULT 50,
+            latency_ms INTEGER,
+            bandwidth_kbps INTEGER,
+            failure_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            last_check INTEGER,
+            added_timestamp INTEGER,
+            UNIQUE(protocol, host, base_path)
+        );
+
+        -- Create server_media link table
+        CREATE TABLE IF NOT EXISTS server_media (
+            server_id INTEGER NOT NULL,
+            media_id INTEGER NOT NULL,
+            added_timestamp INTEGER,
+            PRIMARY KEY (server_id, media_id),
+            FOREIGN KEY (server_id) REFERENCES server(id) ON DELETE CASCADE,
+            FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+        );
+
+        -- Create indexes for server lookups
+        CREATE INDEX IF NOT EXISTS idx_server_host ON server(host);
+        CREATE INDEX IF NOT EXISTS idx_server_enabled ON server(enabled);
+    """),
+    8: (9, """
+        -- Migration v8 -> v9: Directory structure migration (handled in Python code)
+        -- allow_unsigned column is now added in v7->v8 migration
+        SELECT 1;
+    """),
+    9: (10, """
+        -- Migration v9 -> v10: Add ip_mode column to server table
+        ALTER TABLE server ADD COLUMN ip_mode TEXT DEFAULT 'auto';
+    """),
 }
 
 
@@ -274,15 +369,99 @@ class PackageDatabase:
             db_path = get_db_path()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        self.conn = sqlite3.connect(str(self.db_path))
+
+        # Lock for thread-safe database access (used with ThreadingHTTPServer)
+        self._lock = threading.RLock()
+
+        # check_same_thread=False allows sharing connection across threads
+        # We use a lock to serialize write operations
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        
+
         self._init_schema()
-    
+
+    def _detect_schema_version(self) -> int:
+        """Detect schema version from existing tables when schema_info is missing.
+
+        This handles databases created before schema_info was added.
+
+        Returns:
+            Detected schema version (0 if empty/unknown)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Check if media table exists
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='media'"
+        )
+        if not cursor.fetchone():
+            return 0  # Empty database
+
+        # Check for v8 features (server table)
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='server'"
+        )
+        if cursor.fetchone():
+            # v8 - has server table
+            # Create schema_info if missing
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_info (
+                    version INTEGER PRIMARY KEY
+                )
+            """)
+            self.conn.execute("INSERT OR REPLACE INTO schema_info (version) VALUES (8)")
+            self.conn.commit()
+            logger.info("Detected schema version 8 (has server table)")
+            return 8
+
+        # Check for v7 features (peer_downloads table)
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='peer_downloads'"
+        )
+        if cursor.fetchone():
+            # v7 - has peer_downloads but no server
+            # Create schema_info table and set version
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_info (
+                    version INTEGER PRIMARY KEY
+                )
+            """)
+            self.conn.execute("INSERT OR REPLACE INTO schema_info (version) VALUES (7)")
+            self.conn.commit()
+            logger.info("Detected schema version 7 (has peer_downloads, no server)")
+            return 7
+
+        # Check for v6 features (config table with kernel_keep)
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='config'"
+        )
+        if cursor.fetchone():
+            # v6 or earlier with config
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_info (
+                    version INTEGER PRIMARY KEY
+                )
+            """)
+            self.conn.execute("INSERT OR REPLACE INTO schema_info (version) VALUES (6)")
+            self.conn.commit()
+            logger.info("Detected schema version 6 (has config table)")
+            return 6
+
+        # Has media table but nothing else - assume old version
+        logger.warning("Unknown schema version, assuming version 6")
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_info (
+                version INTEGER PRIMARY KEY
+            )
+        """)
+        self.conn.execute("INSERT OR REPLACE INTO schema_info (version) VALUES (6)")
+        self.conn.commit()
+        return 6
+
     def _init_schema(self):
         """Initialize or migrate database schema."""
         # Check existing schema version
@@ -291,7 +470,8 @@ class PackageDatabase:
             row = cursor.fetchone()
             current_version = row[0] if row else 0
         except sqlite3.OperationalError:
-            current_version = 0
+            # No schema_info table - detect version from existing schema
+            current_version = self._detect_schema_version()
 
         if current_version == 0:
             # Fresh database - create full schema
@@ -327,7 +507,7 @@ class PackageDatabase:
                 )
                 self.conn.close()
                 self.db_path.unlink(missing_ok=True)
-                self.conn = sqlite3.connect(str(self.db_path))
+                self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
                 self.conn.row_factory = sqlite3.Row
                 self.conn.execute("PRAGMA journal_mode=WAL")
                 self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -345,13 +525,330 @@ class PackageDatabase:
                     "UPDATE schema_info SET version = ?", (to_version,)
                 )
                 self.conn.commit()
+
+                # Run post-migration data fixups
+                if version == 7 and to_version == 8:
+                    self._migrate_v7_to_v8_data(logger)
+                elif version == 8 and to_version == 9:
+                    # For databases that migrated v7->v8 before directory migration was added
+                    self._migrate_media_directories(logger)
+                elif version == 9 and to_version == 10:
+                    self._migrate_v9_to_v10_test_servers(logger)
                 version = to_version
             except sqlite3.Error as e:
                 logger.error(f"Migration v{version} -> v{to_version} failed: {e}")
                 raise RuntimeError(f"Database migration failed: {e}")
 
         logger.info(f"Database schema is now at version {SCHEMA_VERSION}")
-    
+
+    def _migrate_v7_to_v8_data(self, logger):
+        """Migrate v7 media data to v8 format.
+
+        - Parse existing media URLs
+        - Fill in new columns (short_name, mageia_version, architecture, relative_path)
+        - Create server entries
+        - Link servers to media
+        """
+        from urllib.parse import urlparse
+
+        # Known patterns for parsing
+        KNOWN_VERSIONS = {'7', '8', '9', '10', 'cauldron'}
+        KNOWN_ARCHES = {'x86_64', 'aarch64', 'armv7hl', 'i586', 'i686'}
+        KNOWN_CLASSES = {'core', 'nonfree', 'tainted', 'debug'}
+        KNOWN_TYPES = {'release', 'updates', 'backports', 'backports_testing',
+                       'updates_testing', 'testing'}
+
+        def parse_mageia_url(url):
+            """Parse a Mageia media URL into components."""
+            if not url:
+                return None
+
+            parsed = urlparse(url.rstrip('/'))
+            if parsed.scheme == 'file':
+                protocol = 'file'
+                host = ''
+                path = parsed.path
+            elif parsed.scheme in ('http', 'https'):
+                protocol = parsed.scheme
+                host = parsed.netloc
+                path = parsed.path
+            else:
+                return None
+
+            parts = [p for p in path.split('/') if p]
+
+            # Look for 'media' in path
+            try:
+                media_idx = parts.index('media')
+            except ValueError:
+                return None
+
+            if media_idx < 2 or len(parts) < media_idx + 3:
+                return None
+
+            # Check for debug media: .../media/debug/{class}/{type}
+            is_debug = False
+            if parts[media_idx + 1] == 'debug':
+                is_debug = True
+                if len(parts) < media_idx + 4:
+                    return None
+                class_name = parts[media_idx + 2]
+                type_name = parts[media_idx + 3]
+            else:
+                class_name = parts[media_idx + 1]
+                type_name = parts[media_idx + 2]
+
+            if class_name not in KNOWN_CLASSES:
+                return None
+            if type_name not in KNOWN_TYPES:
+                return None
+
+            arch = parts[media_idx - 1]
+            version = parts[media_idx - 2]
+
+            if arch not in KNOWN_ARCHES:
+                return None
+            if version not in KNOWN_VERSIONS:
+                return None
+
+            version_idx = media_idx - 2
+            base_path_parts = parts[:version_idx]
+            if base_path_parts:
+                base_path = '/' + '/'.join(base_path_parts)
+            else:
+                base_path = ''
+
+            relative_path = '/'.join(parts[version_idx:])
+            if is_debug:
+                short_name = f"debug_{class_name}_{type_name}"
+            else:
+                short_name = f"{class_name}_{type_name}"
+
+            return {
+                'protocol': protocol,
+                'host': host,
+                'base_path': base_path,
+                'relative_path': relative_path,
+                'version': version,
+                'arch': arch,
+                'class_name': class_name,
+                'type_name': type_name,
+                'short_name': short_name,
+            }
+
+        # Get all media with URLs
+        cursor = self.conn.execute(
+            "SELECT id, name, url FROM media WHERE url IS NOT NULL AND url != ''"
+        )
+        media_rows = cursor.fetchall()
+
+        logger.info(f"Migrating {len(media_rows)} media entries to v8 format")
+
+        # Track servers we've created (by protocol+host+base_path)
+        servers = {}  # (protocol, host, base_path) -> server_id
+
+        migrated = 0
+        failed = 0
+
+        for row in media_rows:
+            media_id = row['id']
+            media_name = row['name']
+            url = row['url']
+
+            parsed = parse_mageia_url(url)
+            if not parsed:
+                # Can't parse - keep as legacy
+                logger.warning(f"Could not parse URL for media '{media_name}': {url}")
+                # Set placeholder values so the schema is valid
+                self.conn.execute("""
+                    UPDATE media
+                    SET short_name = ?, mageia_version = ?, architecture = ?,
+                        relative_path = ?, is_official = 1
+                    WHERE id = ?
+                """, (media_name.lower().replace(' ', '_'), 'unknown', 'unknown',
+                      '', media_id))
+                failed += 1
+                continue
+
+            # Update media with parsed values
+            self.conn.execute("""
+                UPDATE media
+                SET short_name = ?, mageia_version = ?, architecture = ?,
+                    relative_path = ?, is_official = 1
+                WHERE id = ?
+            """, (parsed['short_name'], parsed['version'], parsed['arch'],
+                  parsed['relative_path'], media_id))
+
+            # Create or reuse server
+            server_key = (parsed['protocol'], parsed['host'], parsed['base_path'])
+            if server_key not in servers:
+                # Generate server name
+                if parsed['protocol'] == 'file':
+                    server_name = 'local-mirror'
+                else:
+                    host = parsed['host']
+                    if '.' in host:
+                        first_part = host.split('.')[0]
+                        if first_part in ('mirrors', 'mirror', 'ftp', 'www'):
+                            parts = host.split('.')
+                            if len(parts) > 1:
+                                first_part = parts[1]
+                        server_name = first_part
+                    else:
+                        server_name = host
+
+                # Make unique if needed
+                base_name = server_name
+                counter = 1
+                while True:
+                    existing = self.conn.execute(
+                        "SELECT id FROM server WHERE name = ?", (server_name,)
+                    ).fetchone()
+                    if not existing:
+                        break
+                    counter += 1
+                    server_name = f"{base_name}-{counter}"
+
+                # Insert server
+                cursor = self.conn.execute("""
+                    INSERT INTO server (name, protocol, host, base_path,
+                                       is_official, enabled, priority, added_timestamp)
+                    VALUES (?, ?, ?, ?, 1, 1, 50, ?)
+                """, (server_name, parsed['protocol'], parsed['host'],
+                      parsed['base_path'], int(time.time())))
+                server_id = cursor.lastrowid
+                servers[server_key] = server_id
+                logger.info(f"Created server '{server_name}' (id={server_id})")
+            else:
+                server_id = servers[server_key]
+
+            # Create server_media link
+            self.conn.execute("""
+                INSERT OR IGNORE INTO server_media (server_id, media_id, added_timestamp)
+                VALUES (?, ?, ?)
+            """, (server_id, media_id, int(time.time())))
+
+            migrated += 1
+
+        self.conn.commit()
+        logger.info(f"Migration complete: {migrated} migrated, {failed} could not be parsed")
+
+        # Migrate directory structure: <hostname>/<media_name>/ -> official/<relative_path>/
+        self._migrate_media_directories(logger)
+
+    def _migrate_media_directories(self, logger):
+        """Migrate media directories from old to new structure.
+
+        Old: <base_dir>/medias/<hostname>/<media_name>/
+        New: <base_dir>/medias/official/<relative_path>/
+             <base_dir>/medias/custom/<short_name>/
+        """
+        import shutil
+        from .config import get_base_dir
+
+        base_dir = get_base_dir()
+        medias_dir = base_dir / "medias"
+
+        if not medias_dir.exists():
+            logger.info("No medias directory to migrate")
+            return
+
+        # Get all media with their old URL (for hostname extraction) and new paths
+        cursor = self.conn.execute("""
+            SELECT m.id, m.name, m.url, m.relative_path, m.is_official, m.short_name
+            FROM media m
+            WHERE m.relative_path IS NOT NULL AND m.relative_path != ''
+        """)
+
+        moved = 0
+        for row in cursor:
+            media_name = row['name']
+            url = row['url']
+            relative_path = row['relative_path']
+            is_official = row['is_official']
+            short_name = row['short_name']
+
+            if not url:
+                continue
+
+            # Extract hostname from URL for old path
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if parsed.scheme == 'file':
+                hostname = 'local'
+            else:
+                hostname = parsed.netloc or 'local'
+
+            # Old path: <medias>/<hostname>/<media_name>/
+            old_path = medias_dir / hostname / media_name
+
+            # New path based on official or custom
+            if is_official:
+                new_path = medias_dir / "official" / relative_path
+            else:
+                new_path = medias_dir / "custom" / short_name
+
+            if not old_path.exists():
+                continue
+
+            if new_path.exists():
+                logger.warning(f"Target path already exists, skipping: {new_path}")
+                continue
+
+            try:
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_path), str(new_path))
+                logger.info(f"Moved {old_path} -> {new_path}")
+                moved += 1
+            except Exception as e:
+                logger.warning(f"Failed to move {old_path}: {e}")
+
+        # Clean up empty hostname directories
+        if medias_dir.exists():
+            for item in medias_dir.iterdir():
+                if item.is_dir() and item.name not in ('official', 'custom'):
+                    try:
+                        # Only remove if empty
+                        if not any(item.iterdir()):
+                            item.rmdir()
+                            logger.info(f"Removed empty directory: {item}")
+                    except Exception:
+                        pass
+
+        if moved:
+            logger.info(f"Migrated {moved} media directories to new structure")
+
+    def _migrate_v9_to_v10_test_servers(self, logger):
+        """Test all servers for IPv4/IPv6 connectivity and update ip_mode."""
+        from .config import test_server_ip_connectivity
+
+        cursor = self.conn.execute(
+            "SELECT id, name, protocol, host FROM server WHERE protocol IN ('http', 'https')"
+        )
+        servers = cursor.fetchall()
+
+        if not servers:
+            logger.info("No remote servers to test for IP connectivity")
+            return
+
+        logger.info(f"Testing IP connectivity for {len(servers)} server(s)...")
+
+        for srv in servers:
+            host = srv['host']
+            port = 443 if srv['protocol'] == 'https' else 80
+
+            try:
+                ip_mode = test_server_ip_connectivity(host, port, timeout=5.0)
+                self.conn.execute(
+                    "UPDATE server SET ip_mode = ? WHERE id = ?",
+                    (ip_mode, srv['id'])
+                )
+                logger.info(f"  {srv['name']} ({host}): {ip_mode}")
+            except Exception as e:
+                logger.warning(f"  {srv['name']} ({host}): test failed ({e}), keeping 'auto'")
+
+        self.conn.commit()
+
     def close(self):
         """Close database connection."""
         self.conn.close()
@@ -366,17 +863,63 @@ class PackageDatabase:
     # Media management
     # =========================================================================
     
-    def add_media(self, name: str, url: str = None, mirrorlist: str = None,
-                  enabled: bool = True, update: bool = False) -> int:
+    def add_media(self, name: str, short_name: str, mageia_version: str,
+                  architecture: str, relative_path: str,
+                  is_official: bool = True, allow_unsigned: bool = False,
+                  enabled: bool = True, update_media: bool = False,
+                  priority: int = 50, url: str = None,
+                  mirrorlist: str = None) -> int:
         """Add a new media source.
-        
+
+        Args:
+            name: Display name (e.g., 'Core Release')
+            short_name: Filesystem-safe identifier (e.g., 'core_release')
+            mageia_version: Mageia version (e.g., '9', 'cauldron')
+            architecture: Architecture (e.g., 'x86_64')
+            relative_path: Relative path for URL construction
+            is_official: True for official Mageia media
+            allow_unsigned: Allow unsigned packages (custom media only)
+            enabled: Whether the media is enabled
+            update_media: Whether this is an update media
+            priority: Priority for package selection
+            url: Legacy URL field (deprecated)
+            mirrorlist: Legacy mirrorlist field (deprecated)
+
         Returns:
             Media ID
         """
         cursor = self.conn.execute("""
-            INSERT INTO media (name, url, mirrorlist, enabled, update_media, added_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, url, mirrorlist, int(enabled), int(update), int(time.time())))
+            INSERT INTO media (name, short_name, mageia_version, architecture,
+                              relative_path, is_official, allow_unsigned,
+                              enabled, update_media, priority, url,
+                              mirrorlist, added_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, short_name, mageia_version, architecture, relative_path,
+              int(is_official), int(allow_unsigned), int(enabled),
+              int(update_media), priority, url, mirrorlist, int(time.time())))
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def add_media_legacy(self, name: str, url: str = None, mirrorlist: str = None,
+                         enabled: bool = True, update: bool = False) -> int:
+        """Add a new media source (legacy API for compatibility).
+
+        DEPRECATED: Use add_media() with new parameters instead.
+
+        Returns:
+            Media ID
+        """
+        # Generate placeholder values for required fields
+        cursor = self.conn.execute("""
+            INSERT INTO media (name, url, mirrorlist, enabled, update_media,
+                              short_name, mageia_version, architecture,
+                              relative_path, is_official, added_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, url, mirrorlist, int(enabled), int(update),
+              name.lower().replace(' ', '_'),  # short_name placeholder
+              'unknown', 'unknown', '',  # version, arch, path placeholders
+              1,  # is_official default
+              int(time.time())))
         self.conn.commit()
         return cursor.lastrowid
     
@@ -405,7 +948,218 @@ class PackageDatabase:
             (int(enabled), name)
         )
         self.conn.commit()
-    
+
+    def get_media_by_id(self, media_id: int) -> Optional[Dict]:
+        """Get media info by ID."""
+        cursor = self.conn.execute(
+            "SELECT * FROM media WHERE id = ?", (media_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_media_by_version_arch_shortname(self, version: str, arch: str,
+                                             short_name: str) -> Optional[Dict]:
+        """Get media by version, architecture and short_name (unique key)."""
+        cursor = self.conn.execute(
+            """SELECT * FROM media
+               WHERE mageia_version = ? AND architecture = ? AND short_name = ?""",
+            (version, arch, short_name)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    # =========================================================================
+    # Server management
+    # =========================================================================
+
+    def add_server(self, name: str, protocol: str, host: str, base_path: str = '',
+                   is_official: bool = True, enabled: bool = True,
+                   priority: int = 50) -> int:
+        """Add a new server.
+
+        Args:
+            name: Display name for the server
+            protocol: 'http', 'https', or 'file'
+            host: FQDN or 'localhost' for file://
+            base_path: Base path on the server (e.g., '/mageia')
+            is_official: True for official Mageia mirrors
+            enabled: Whether the server is enabled
+            priority: Manual priority (higher = preferred)
+
+        Returns:
+            Server ID
+        """
+        cursor = self.conn.execute("""
+            INSERT INTO server (name, protocol, host, base_path, is_official,
+                               enabled, priority, added_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, protocol, host, base_path, int(is_official),
+              int(enabled), priority, int(time.time())))
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_server(self, name: str) -> Optional[Dict]:
+        """Get server info by name."""
+        cursor = self.conn.execute(
+            "SELECT * FROM server WHERE name = ?", (name,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_server_by_id(self, server_id: int) -> Optional[Dict]:
+        """Get server info by ID."""
+        cursor = self.conn.execute(
+            "SELECT * FROM server WHERE id = ?", (server_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_server_by_location(self, protocol: str, host: str,
+                                base_path: str = '') -> Optional[Dict]:
+        """Get server by protocol/host/base_path (unique key for upsert)."""
+        cursor = self.conn.execute(
+            """SELECT * FROM server
+               WHERE protocol = ? AND host = ? AND base_path = ?""",
+            (protocol, host, base_path)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_servers(self, enabled_only: bool = False) -> List[Dict]:
+        """List all servers, ordered by priority (descending)."""
+        if enabled_only:
+            cursor = self.conn.execute(
+                "SELECT * FROM server WHERE enabled = 1 ORDER BY priority DESC, name"
+            )
+        else:
+            cursor = self.conn.execute(
+                "SELECT * FROM server ORDER BY priority DESC, name"
+            )
+        return [dict(row) for row in cursor]
+
+    def remove_server(self, name: str):
+        """Remove a server (cascades to server_media links)."""
+        self.conn.execute("DELETE FROM server WHERE name = ?", (name,))
+        self.conn.commit()
+
+    def enable_server(self, name: str, enabled: bool = True):
+        """Enable or disable a server."""
+        self.conn.execute(
+            "UPDATE server SET enabled = ? WHERE name = ?",
+            (int(enabled), name)
+        )
+        self.conn.commit()
+
+    def set_server_priority(self, name: str, priority: int):
+        """Set server priority."""
+        self.conn.execute(
+            "UPDATE server SET priority = ? WHERE name = ?",
+            (priority, name)
+        )
+        self.conn.commit()
+
+    def set_server_ip_mode(self, name: str, ip_mode: str):
+        """Set server IP mode.
+
+        Args:
+            name: Server name
+            ip_mode: 'auto', 'ipv4', 'ipv6', or 'dual'
+        """
+        if ip_mode not in ('auto', 'ipv4', 'ipv6', 'dual'):
+            raise ValueError(f"Invalid ip_mode: {ip_mode}")
+        self.conn.execute(
+            "UPDATE server SET ip_mode = ? WHERE name = ?",
+            (ip_mode, name)
+        )
+        self.conn.commit()
+
+    def set_server_ip_mode_by_id(self, server_id: int, ip_mode: str):
+        """Set server IP mode by ID.
+
+        Args:
+            server_id: Server ID
+            ip_mode: 'auto', 'ipv4', 'ipv6', or 'dual'
+        """
+        if ip_mode not in ('auto', 'ipv4', 'ipv6', 'dual'):
+            raise ValueError(f"Invalid ip_mode: {ip_mode}")
+        self.conn.execute(
+            "UPDATE server SET ip_mode = ? WHERE id = ?",
+            (ip_mode, server_id)
+        )
+        self.conn.commit()
+
+    # =========================================================================
+    # Server-Media links
+    # =========================================================================
+
+    def link_server_media(self, server_id: int, media_id: int):
+        """Create a link between a server and a media."""
+        self.conn.execute("""
+            INSERT OR IGNORE INTO server_media (server_id, media_id, added_timestamp)
+            VALUES (?, ?, ?)
+        """, (server_id, media_id, int(time.time())))
+        self.conn.commit()
+
+    def unlink_server_media(self, server_id: int, media_id: int):
+        """Remove a link between a server and a media."""
+        self.conn.execute(
+            "DELETE FROM server_media WHERE server_id = ? AND media_id = ?",
+            (server_id, media_id)
+        )
+        self.conn.commit()
+
+    def get_servers_for_media(self, media_id: int, enabled_only: bool = True,
+                               limit: int = None) -> List[Dict]:
+        """Get all servers that can serve a media, ordered by priority.
+
+        Args:
+            media_id: Media ID
+            enabled_only: Only return enabled servers
+            limit: Maximum number of servers to return
+
+        Returns:
+            List of server dicts, ordered by priority (descending)
+        """
+        query = """
+            SELECT s.* FROM server s
+            JOIN server_media sm ON s.id = sm.server_id
+            WHERE sm.media_id = ?
+        """
+        if enabled_only:
+            query += " AND s.enabled = 1"
+        query += " ORDER BY s.priority DESC, s.name"
+        if limit:
+            query += f" LIMIT {limit}"
+
+        cursor = self.conn.execute(query, (media_id,))
+        return [dict(row) for row in cursor]
+
+    def get_media_for_server(self, server_id: int) -> List[Dict]:
+        """Get all media served by a server."""
+        cursor = self.conn.execute("""
+            SELECT m.* FROM media m
+            JOIN server_media sm ON m.id = sm.media_id
+            WHERE sm.server_id = ?
+            ORDER BY m.name
+        """, (server_id,))
+        return [dict(row) for row in cursor]
+
+    def get_best_server_for_media(self, media_id: int) -> Optional[Dict]:
+        """Get the best available server for a media.
+
+        Returns the enabled server with highest priority.
+        """
+        servers = self.get_servers_for_media(media_id, enabled_only=True, limit=1)
+        return servers[0] if servers else None
+
+    def server_media_link_exists(self, server_id: int, media_id: int) -> bool:
+        """Check if a server-media link exists."""
+        cursor = self.conn.execute(
+            "SELECT 1 FROM server_media WHERE server_id = ? AND media_id = ?",
+            (server_id, media_id)
+        )
+        return cursor.fetchone() is not None
+
     # =========================================================================
     # Package import
     # =========================================================================

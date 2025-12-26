@@ -200,3 +200,168 @@ def get_hostname_from_url(url: str) -> str:
     from urllib.parse import urlparse
     parsed = urlparse(url)
     return parsed.netloc or "local"
+
+
+# =============================================================================
+# New media/server path functions (v8 schema)
+# =============================================================================
+
+def get_media_local_path(media: dict, base_dir: Path = None) -> Path:
+    """Get local cache path for a media.
+
+    Official media: <base_dir>/medias/official/<relative_path>/
+    Custom media:   <base_dir>/medias/custom/<short_name>/
+
+    Args:
+        media: Media dict with 'is_official', 'relative_path', 'short_name'
+        base_dir: Base urpm directory (auto-detected if None)
+
+    Returns:
+        Full local path for the media cache
+    """
+    if base_dir is None:
+        base_dir = get_base_dir()
+
+    if media.get('is_official', 1):
+        # Official: use relative_path
+        return base_dir / "medias" / "official" / media['relative_path']
+    else:
+        # Custom: use short_name (isolated for security)
+        return base_dir / "medias" / "custom" / media['short_name']
+
+
+def build_server_url(server: dict) -> str:
+    """Build base URL for a server.
+
+    Args:
+        server: Server dict with 'protocol', 'host', 'base_path'
+
+    Returns:
+        Base URL string (without trailing slash)
+    """
+    protocol = server['protocol']
+    host = server['host']
+    base_path = server.get('base_path', '').rstrip('/')
+
+    if protocol == 'file':
+        # Local filesystem - just return the path
+        return base_path
+    else:
+        # Remote URL
+        return f"{protocol}://{host}{base_path}"
+
+
+def build_media_url(server: dict, media: dict) -> str:
+    """Build full URL/path to access a media on a server.
+
+    Args:
+        server: Server dict with 'protocol', 'host', 'base_path'
+        media: Media dict with 'relative_path'
+
+    Returns:
+        Full URL or local path to the media
+    """
+    base_url = build_server_url(server)
+    relative_path = media['relative_path'].strip('/')
+
+    if server['protocol'] == 'file':
+        # Local filesystem path
+        return f"{base_url}/{relative_path}"
+    else:
+        # Remote URL
+        return f"{base_url}/{relative_path}"
+
+
+def is_local_server(server: dict) -> bool:
+    """Check if a server is a local filesystem (file://)."""
+    return server.get('protocol') == 'file'
+
+
+# =============================================================================
+# IPv4/IPv6 connectivity testing
+# =============================================================================
+
+def test_server_ip_connectivity(host: str, port: int = 80, timeout: float = 5.0) -> str:
+    """Test IPv4 and IPv6 connectivity to a server.
+
+    Args:
+        host: Hostname to test (e.g., 'ftp.belnet.be')
+        port: Port to connect to (default 80 for HTTP)
+        timeout: Connection timeout in seconds
+
+    Returns:
+        ip_mode string:
+        - 'dual': Both IPv4 and IPv6 work (prefer IPv4 in downloads)
+        - 'ipv4': Only IPv4 works
+        - 'ipv6': Only IPv6 works
+        - 'auto': Could not test (DNS failure, etc.) - use system default
+    """
+    import socket
+
+    ipv4_works = False
+    ipv6_works = False
+
+    # Test IPv4
+    try:
+        # Get IPv4 addresses only
+        addrs = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+        if addrs:
+            addr = addrs[0][4]  # (ip, port)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            try:
+                sock.connect(addr)
+                ipv4_works = True
+            finally:
+                sock.close()
+    except (socket.gaierror, socket.timeout, OSError):
+        pass
+
+    # Test IPv6
+    try:
+        # Get IPv6 addresses only
+        addrs = socket.getaddrinfo(host, port, socket.AF_INET6, socket.SOCK_STREAM)
+        if addrs:
+            addr = addrs[0][4]  # (ip, port, flowinfo, scopeid)
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            try:
+                sock.connect(addr)
+                ipv6_works = True
+            finally:
+                sock.close()
+    except (socket.gaierror, socket.timeout, OSError):
+        pass
+
+    # Determine ip_mode
+    if ipv4_works and ipv6_works:
+        return 'dual'
+    elif ipv4_works:
+        return 'ipv4'
+    elif ipv6_works:
+        return 'ipv6'
+    else:
+        return 'auto'  # Neither worked, let system decide
+
+
+def get_socket_family_for_ip_mode(ip_mode: str) -> int:
+    """Get the socket address family to use for a given ip_mode.
+
+    Args:
+        ip_mode: 'auto', 'ipv4', 'ipv6', or 'dual'
+
+    Returns:
+        socket.AF_INET, socket.AF_INET6, or 0 (auto)
+    """
+    import socket
+
+    if ip_mode == 'ipv4':
+        return socket.AF_INET
+    elif ip_mode == 'ipv6':
+        return socket.AF_INET6
+    elif ip_mode == 'dual':
+        # Prefer IPv4 for dual-stack
+        return socket.AF_INET
+    else:
+        # 'auto' - let system decide
+        return 0

@@ -738,14 +738,40 @@ def create_parser() -> argparse.ArgumentParser:
         'list', aliases=['l', 'ls'],
         help='List media sources'
     )
-    
+    media_list.add_argument(
+        '--all', '-a',
+        action='store_true',
+        help='Show all media (including disabled)'
+    )
+
     # media add / a
     media_add = media_subparsers.add_parser(
         'add', aliases=['a'],
-        help='Add media source'
+        help='Add media source',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Add a media source.
+
+For official Mageia media, just provide the URL:
+  urpm media add https://mirrors.mageia.org/mageia/9/x86_64/media/core/release/
+
+For custom/third-party media, use --custom with name and short_name:
+  urpm media add --custom "My Repo" myrepo https://example.com/repo/x86_64/
+
+For legacy mode (non-Mageia URL with explicit name):
+  urpm media add --name "My Media" https://example.com/repo/
+'''
     )
-    media_add.add_argument('name', help='Media name')
     media_add.add_argument('url', help='Media URL')
+    media_add.add_argument(
+        '--name',
+        help='Media name (legacy mode, for non-Mageia URLs without --custom)'
+    )
+    media_add.add_argument(
+        '--custom',
+        nargs=2,
+        metavar=('NAME', 'SHORT_NAME'),
+        help='Add as custom media with display name and short identifier'
+    )
     media_add.add_argument(
         '--update',
         action='store_true',
@@ -759,12 +785,17 @@ def create_parser() -> argparse.ArgumentParser:
     media_add.add_argument(
         '--auto', '-y',
         action='store_true',
-        help='Auto-import GPG key without confirmation'
+        help='Non-interactive mode (auto-confirm prompts)'
     )
     media_add.add_argument(
-        '--nokey',
+        '--import-key',
         action='store_true',
-        help='Do not check/import GPG key'
+        help='Import GPG key from media'
+    )
+    media_add.add_argument(
+        '--allow-unsigned',
+        action='store_true',
+        help='Allow unsigned packages (custom media only)'
     )
 
     # media remove / r
@@ -817,6 +848,109 @@ def create_parser() -> argparse.ArgumentParser:
         '--auto', '-y',
         action='store_true',
         help='No confirmation'
+    )
+
+    # =========================================================================
+    # server / srv
+    # =========================================================================
+    server_parser = subparsers.add_parser(
+        'server', aliases=['srv'],
+        help='Manage servers',
+        parents=[display_parent]
+    )
+    server_subparsers = server_parser.add_subparsers(
+        dest='server_command',
+        metavar='<subcommand>'
+    )
+
+    # server list / l / ls
+    server_list = server_subparsers.add_parser(
+        'list', aliases=['l', 'ls'],
+        help='List servers'
+    )
+    server_list.add_argument(
+        '--all', '-a',
+        action='store_true',
+        help='Show all servers (including disabled)'
+    )
+
+    # server add / a
+    server_add = server_subparsers.add_parser(
+        'add', aliases=['a'],
+        help='Add a server',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Add a mirror server.
+
+Examples:
+  urpm server add "Belnet" https://ftp.belnet.be/mageia/distrib/
+  urpm server add "Local" file:///mnt/repo/
+'''
+    )
+    server_add.add_argument('name', help='Server display name')
+    server_add.add_argument('url', help='Server base URL (https://host/path/ or file:///path/)')
+    server_add.add_argument(
+        '--priority', '-p', type=int, default=50,
+        help='Server priority (higher = preferred, default: 50)'
+    )
+    server_add.add_argument(
+        '--disabled',
+        action='store_true',
+        help='Add as disabled'
+    )
+    server_add.add_argument(
+        '--custom',
+        action='store_true',
+        help='Mark as non-official server'
+    )
+
+    # server remove / r / rm
+    server_remove = server_subparsers.add_parser(
+        'remove', aliases=['r', 'rm'],
+        help='Remove a server'
+    )
+    server_remove.add_argument('name', help='Server name')
+
+    # server enable / e
+    server_enable = server_subparsers.add_parser(
+        'enable', aliases=['e'],
+        help='Enable a server'
+    )
+    server_enable.add_argument('name', help='Server name')
+
+    # server disable / d
+    server_disable = server_subparsers.add_parser(
+        'disable', aliases=['d'],
+        help='Disable a server'
+    )
+    server_disable.add_argument('name', help='Server name')
+
+    # server priority
+    server_priority = server_subparsers.add_parser(
+        'priority',
+        help='Set server priority'
+    )
+    server_priority.add_argument('name', help='Server name')
+    server_priority.add_argument('priority', type=int, help='Priority (higher = preferred)')
+
+    # server test / t
+    server_test = server_subparsers.add_parser(
+        'test', aliases=['t'],
+        help='Test server connectivity and detect IP mode'
+    )
+    server_test.add_argument(
+        'name', nargs='?',
+        help='Server name (empty = test all enabled servers)'
+    )
+
+    # server ip-mode
+    server_ipmode = server_subparsers.add_parser(
+        'ip-mode',
+        help='Set server IP mode manually'
+    )
+    server_ipmode.add_argument('name', help='Server name')
+    server_ipmode.add_argument(
+        'mode', choices=['auto', 'ipv4', 'ipv6', 'dual'],
+        help='IP mode: auto, ipv4, ipv6, or dual (dual = prefer ipv4)'
     )
 
     # =========================================================================
@@ -1423,18 +1557,278 @@ def cmd_show(args, db: PackageDatabase) -> int:
 
 def cmd_media_list(args, db: PackageDatabase) -> int:
     """Handle media list command."""
+    from . import colors
+
+    show_all = getattr(args, 'all', False)
     media_list = db.list_media()
 
     if not media_list:
         print("No media configured")
         return 0
 
+    # Filter to enabled only unless --all
+    if not show_all:
+        media_list = [m for m in media_list if m['enabled']]
+        if not media_list:
+            print("No enabled media (use --all to see disabled)")
+            return 0
+
+    # Find max lengths for alignment (on raw text, before coloring)
+    max_name = max(len(m['name']) for m in media_list)
+    max_path = max(len(m.get('relative_path') or '') for m in media_list)
+
     for m in media_list:
-        status = "[x]" if m['enabled'] else "[ ]"
-        update_tag = " [update]" if m['update_media'] else ""
-        print(f"  {status} {m['name']:20} {m['url'] or m['mirrorlist'] or ''}{update_tag}")
+        # Get servers for this media
+        servers = db.get_servers_for_media(m['id'], enabled_only=False)
+
+        # Status: [x] or [ ]
+        status = colors.success("[x]") if m['enabled'] else colors.dim("[ ]")
+
+        # Update flag: U or space
+        update_flag = colors.info("U") if m['update_media'] else " "
+
+        # Name - pad first, then apply color
+        name_raw = m['name']
+        name_padded = f"{name_raw:{max_name}}"
+        name = colors.dim(name_padded) if not m['enabled'] else name_padded
+
+        # Relative path - pad first, then apply color if needed
+        rel_path_raw = m.get('relative_path') or ''
+        rel_path_padded = f"{rel_path_raw:{max_path}}"
+        rel_path = colors.dim(rel_path_padded) if not m['enabled'] else rel_path_padded
+
+        # Server hosts (green if enabled, dim if disabled)
+        if servers:
+            server_strs = []
+            for s in servers:
+                host = s['host']
+                if s['enabled']:
+                    server_strs.append(colors.success(host))
+                else:
+                    server_strs.append(colors.dim(host))
+            servers_display = " ".join(server_strs)
+        else:
+            servers_display = colors.warning("(no server)")
+
+        print(f"  {status} {update_flag} {name}  {rel_path}  {servers_display}")
 
     return 0
+
+
+# =============================================================================
+# URL Parsing for new media schema (v8)
+# =============================================================================
+
+# Known Mageia versions (for detection)
+KNOWN_VERSIONS = {'7', '8', '9', '10', 'cauldron'}
+
+# Known architectures
+KNOWN_ARCHES = {'x86_64', 'aarch64', 'armv7hl', 'i586', 'i686'}
+
+# Known media classes
+KNOWN_CLASSES = {'core', 'nonfree', 'tainted', 'debug'}
+
+# Known media types
+KNOWN_TYPES = {'release', 'updates', 'backports', 'backports_testing', 'updates_testing', 'testing'}
+
+
+def _generate_media_name(class_name: str, type_name: str) -> str:
+    """Generate display name from class and type.
+
+    Examples:
+        core, release -> Core Release
+        nonfree, updates -> Nonfree Updates
+        tainted, backports_testing -> Tainted Backports Testing
+    """
+    class_title = class_name.capitalize()
+    type_title = type_name.replace('_', ' ').title()
+    return f"{class_title} {type_title}"
+
+
+def _generate_short_name(class_name: str, type_name: str) -> str:
+    """Generate short_name from class and type.
+
+    Examples:
+        core, release -> core_release
+        nonfree, updates -> nonfree_updates
+    """
+    return f"{class_name}_{type_name}"
+
+
+def parse_mageia_media_url(url: str) -> dict | None:
+    """Parse an official Mageia media URL.
+
+    Detects pattern: .../version/arch/media/class/type/
+    Also handles file:// URLs for local mirrors.
+
+    Args:
+        url: Full URL to a media
+
+    Returns:
+        Dict with parsed components, or None if not a recognized Mageia URL.
+        Keys: protocol, host, base_path, relative_path, version, arch,
+              class_name, type_name, name, short_name, is_official
+    """
+    from urllib.parse import urlparse
+
+    # Parse URL
+    parsed = urlparse(url.rstrip('/'))
+
+    if parsed.scheme == 'file':
+        protocol = 'file'
+        host = ''  # No host for file:// URLs
+        path = parsed.path
+    elif parsed.scheme in ('http', 'https'):
+        protocol = parsed.scheme
+        host = parsed.netloc
+        path = parsed.path
+    else:
+        return None  # Unknown protocol
+
+    # Split path into components
+    parts = [p for p in path.split('/') if p]
+
+    # Look for the pattern: version/arch/media/class/type
+    # Or for debug: version/arch/media/debug/class/type
+    # Search for 'media' keyword
+    try:
+        media_idx = parts.index('media')
+    except ValueError:
+        return None  # No 'media' in path
+
+    # Need at least: something before media, and class/type after
+    if media_idx < 2 or len(parts) < media_idx + 3:
+        return None
+
+    # Check for debug media: .../media/debug/{class}/{type}
+    is_debug = False
+    if parts[media_idx + 1] == 'debug':
+        is_debug = True
+        if len(parts) < media_idx + 4:
+            return None
+        class_name = parts[media_idx + 2]
+        type_name = parts[media_idx + 3]
+    else:
+        class_name = parts[media_idx + 1]
+        type_name = parts[media_idx + 2]
+
+    # Validate class and type
+    if class_name not in KNOWN_CLASSES:
+        return None
+    if type_name not in KNOWN_TYPES:
+        return None
+
+    # Look backwards from 'media' for version and arch
+    # Pattern should be: version/arch/media
+    arch = parts[media_idx - 1]
+    version = parts[media_idx - 2]
+
+    # Validate version and arch
+    if arch not in KNOWN_ARCHES:
+        return None
+    if version not in KNOWN_VERSIONS:
+        return None
+
+    # Calculate base_path (everything before version)
+    # e.g., /mageia or /pub/linux/Mageia
+    version_idx = media_idx - 2
+    base_path_parts = parts[:version_idx]
+    if base_path_parts:
+        base_path = '/' + '/'.join(base_path_parts)
+    else:
+        base_path = ''
+
+    # Calculate relative_path (version onwards)
+    # e.g., 9/x86_64/media/core/release
+    relative_path = '/'.join(parts[version_idx:])
+
+    # Generate names
+    if is_debug:
+        name = _generate_media_name(class_name, type_name) + " Debug"
+        short_name = "debug_" + _generate_short_name(class_name, type_name)
+    else:
+        name = _generate_media_name(class_name, type_name)
+        short_name = _generate_short_name(class_name, type_name)
+
+    return {
+        'protocol': protocol,
+        'host': host,
+        'base_path': base_path,
+        'relative_path': relative_path,
+        'version': version,
+        'arch': arch,
+        'class_name': class_name,
+        'is_debug': is_debug,
+        'type_name': type_name,
+        'name': name,
+        'short_name': short_name,
+        'is_official': True,
+    }
+
+
+def parse_custom_media_url(url: str) -> dict | None:
+    """Parse a custom (non-Mageia) media URL.
+
+    For custom URLs, we can't auto-detect version/arch.
+    We use the hostname as base and the path as relative_path.
+
+    Args:
+        url: Full URL to a custom media
+
+    Returns:
+        Dict with parsed components, or None if invalid.
+        Keys: protocol, host, base_path, relative_path
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url.rstrip('/'))
+
+    if parsed.scheme == 'file':
+        protocol = 'file'
+        host = ''
+        # For file://, everything is the path
+        relative_path = parsed.path.lstrip('/')
+        base_path = ''
+    elif parsed.scheme in ('http', 'https'):
+        protocol = parsed.scheme
+        host = parsed.netloc
+        # For http(s), base_path is empty, relative_path is the full path
+        relative_path = parsed.path.lstrip('/')
+        base_path = ''
+    else:
+        return None
+
+    return {
+        'protocol': protocol,
+        'host': host,
+        'base_path': base_path,
+        'relative_path': relative_path,
+        'is_official': False,
+    }
+
+
+def _generate_server_name(protocol: str, host: str) -> str:
+    """Generate a server name from protocol and host.
+
+    Examples:
+        https, mirrors.mageia.org -> mageia-official
+        https, distrib-coffee.ipsl.jussieu.fr -> distrib-coffee
+        file, '' -> local-mirror
+    """
+    if protocol == 'file':
+        return 'local-mirror'
+
+    # Use first part of hostname
+    if '.' in host:
+        first_part = host.split('.')[0]
+        # Special case for common mirror names
+        if first_part in ('mirrors', 'mirror', 'ftp', 'www'):
+            # Use second part instead
+            parts = host.split('.')
+            if len(parts) > 1:
+                first_part = parts[1]
+        return first_part
+    return host
 
 
 def _fetch_media_pubkey(url: str) -> bytes | None:
@@ -1552,88 +1946,218 @@ def _import_gpg_key(key_data: bytes) -> bool:
 
 
 def cmd_media_add(args, db: PackageDatabase) -> int:
-    """Handle media add command."""
+    """Handle media add command.
+
+    Supports two modes:
+    1. Official Mageia media: urpm media add <url>
+       Auto-parses URL to extract version, arch, class, type
+    2. Custom media: urpm media add --custom <name> <short_name> <url>
+       User provides name and short_name explicitly
+
+    Uses v8 schema with server/media/server_media tables.
+    Falls back to legacy mode if URL parsing fails.
+    """
     from . import colors
     from ..core.install import check_root
 
-    name = args.name
     url = args.url
+    custom_args = getattr(args, 'custom', None)
+    is_custom = custom_args is not None
 
-    # Check if already exists
-    if db.get_media(name):
-        print(f"Media '{name}' already exists")
+    # Parse URL based on mode
+    if is_custom:
+        # Custom mode: user provides name and short_name via --custom "Name" short_name
+        name = custom_args[0]
+        short_name = custom_args[1]
+
+        parsed = parse_custom_media_url(url)
+        if not parsed:
+            print(colors.error(f"Error: could not parse URL: {url}"))
+            return 1
+
+        parsed['name'] = name
+        parsed['short_name'] = short_name
+        # For custom, we need version/arch from system or args
+        # Default to current system
+        import platform
+        machine = platform.machine()
+        parsed['version'] = getattr(args, 'version', 'custom')
+        parsed['arch'] = machine if machine in KNOWN_ARCHES else 'x86_64'
+
+    else:
+        # Official mode: auto-parse URL
+        parsed = parse_mageia_media_url(url)
+
+        if not parsed:
+            # Fallback: try legacy mode if --name is provided
+            if hasattr(args, 'name') and args.name:
+                print(colors.dim("URL not recognized as official Mageia, using legacy mode"))
+                media_id = db.add_media(
+                    name=args.name,
+                    url=url,
+                    enabled=not getattr(args, 'disabled', False),
+                    update=getattr(args, 'update', False)
+                )
+                print(f"Added media '{args.name}' (id={media_id}) [legacy mode]")
+                return 0
+            else:
+                print(colors.error("Error: URL not recognized as official Mageia media"))
+                print("For official media, URL must contain: .../version/arch/media/class/type/")
+                print("For custom media, use: urpm media add --custom <name> <short_name> <url>")
+                return 1
+
+    # Extract parsed values
+    protocol = parsed['protocol']
+    host = parsed['host']
+    base_path = parsed['base_path']
+    relative_path = parsed['relative_path']
+    name = parsed['name']
+    short_name = parsed['short_name']
+    version = parsed['version']
+    arch = parsed['arch']
+    is_official = parsed['is_official']
+
+    # Check --allow-unsigned is only used with custom media
+    allow_unsigned = getattr(args, 'allow_unsigned', False)
+    if allow_unsigned and is_official:
+        print(colors.error("Error: --allow-unsigned can only be used with custom media"))
         return 1
 
-    # Check for pubkey in media_info (unless --nokey)
-    if not getattr(args, 'nokey', False):
-        print(f"Checking for GPG key at {url}/media_info/pubkey...")
+    # GPG key import (optional, only with --import-key)
+    # Signature verification happens at package install time, not here
+    import_key = getattr(args, 'import_key', False)
+
+    if import_key and protocol != 'file':
+        print(f"Fetching GPG key from {url}/media_info/pubkey...")
         try:
             key_data = _fetch_media_pubkey(url)
         except Exception as e:
-            print(colors.warning(f"Warning: could not fetch pubkey: {e}"))
-            key_data = None
+            print(colors.error(f"Error: could not fetch pubkey: {e}"))
+            return 1
 
-        if key_data:
-            key_info = _get_gpg_key_info(key_data)
-            if key_info:
-                keyid = key_info['keyid']
-                if _is_key_in_rpm_keyring(keyid):
-                    print(colors.success(f"  Key {keyid} already in keyring"))
-                else:
-                    # Key not in keyring - ask user or auto-import
-                    print(f"\n  Key ID:      {key_info.get('keyid_long', keyid)}")
-                    if key_info.get('fingerprint'):
-                        fp = key_info['fingerprint']
-                        # Format fingerprint in groups of 4
-                        fp_formatted = ' '.join([fp[i:i+4] for i in range(0, len(fp), 4)])
-                        print(f"  Fingerprint: {fp_formatted}")
-                    if key_info.get('uid'):
-                        print(f"  User ID:     {key_info['uid']}")
-                    if key_info.get('created'):
-                        from datetime import datetime
-                        try:
-                            ts = int(key_info['created'])
-                            dt = datetime.fromtimestamp(ts)
-                            print(f"  Created:     {dt.strftime('%Y-%m-%d')}")
-                        except (ValueError, OSError):
-                            pass
-                    print()
+        if not key_data:
+            print(colors.error("Error: no pubkey found at media"))
+            return 1
 
-                    auto = getattr(args, 'auto', False)
-                    if auto:
-                        do_import = True
-                    else:
-                        try:
-                            response = input("Import this key? [Y/n] ")
-                            do_import = response.lower() in ('', 'y', 'yes')
-                        except (KeyboardInterrupt, EOFError):
-                            print("\nAborted")
-                            return 1
+        key_info = _get_gpg_key_info(key_data)
+        if not key_info:
+            print(colors.error("Error: could not parse pubkey"))
+            return 1
 
-                    if do_import:
-                        if not check_root():
-                            print(colors.error("Error: importing keys requires root privileges"))
-                            return 1
-                        if _import_gpg_key(key_data):
-                            print(colors.success(f"  Key {keyid} imported"))
-                        else:
-                            print(colors.error("  Failed to import key"))
-                            return 1
-                    else:
-                        print(colors.warning("  Key not imported - package signatures may fail"))
-            else:
-                print(colors.warning("  Warning: could not parse pubkey"))
+        keyid = key_info['keyid']
+        print(f"  Key ID:      {key_info.get('keyid_long', keyid)}")
+        if key_info.get('fingerprint'):
+            fp = key_info['fingerprint']
+            fp_formatted = ' '.join([fp[i:i+4] for i in range(0, len(fp), 4)])
+            print(f"  Fingerprint: {fp_formatted}")
+        if key_info.get('uid'):
+            print(f"  User ID:     {key_info['uid']}")
+
+        if _is_key_in_rpm_keyring(keyid):
+            print(colors.success(f"  Key {keyid} already in keyring"))
         else:
-            print(colors.dim("  No pubkey found"))
+            # Import the key
+            auto = getattr(args, 'auto', False)
+            if not auto:
+                try:
+                    response = input("\nImport this key? [y/N] ")
+                    if response.lower() not in ('y', 'yes'):
+                        print("Aborted")
+                        return 1
+                except (KeyboardInterrupt, EOFError):
+                    print("\nAborted")
+                    return 1
 
-    media_id = db.add_media(
-        name=name,
-        url=url,
-        enabled=not args.disabled,
-        update=args.update
-    )
+            if not check_root():
+                print(colors.error("Error: importing keys requires root privileges"))
+                return 1
 
-    print(f"Added media '{name}' (id={media_id})")
+            if _import_gpg_key(key_data):
+                print(colors.success(f"  Key {keyid} imported"))
+            else:
+                print(colors.error("  Failed to import key"))
+                return 1
+
+    # --- Server upsert ---
+    # Check if server already exists by protocol+host+base_path
+    server = db.get_server_by_location(protocol, host, base_path)
+    server_created = False
+
+    if not server:
+        # Create new server
+        server_name = _generate_server_name(protocol, host)
+        # Make server name unique if needed
+        base_server_name = server_name
+        counter = 1
+        while True:
+            try:
+                server_id = db.add_server(
+                    name=server_name,
+                    protocol=protocol,
+                    host=host,
+                    base_path=base_path,
+                    is_official=is_official,
+                    enabled=True,
+                    priority=50
+                )
+                server_created = True
+                print(f"  Created server '{server_name}' (id={server_id})")
+                server = {'id': server_id, 'name': server_name}
+                break
+            except Exception as e:
+                if 'UNIQUE constraint' in str(e) and 'name' in str(e):
+                    counter += 1
+                    server_name = f"{base_server_name}-{counter}"
+                else:
+                    raise
+    else:
+        print(f"  Using existing server '{server['name']}' (id={server['id']})")
+
+    # --- Media upsert ---
+    # Check if media already exists by version+arch+short_name
+    media = db.get_media_by_version_arch_shortname(version, arch, short_name)
+    media_created = False
+
+    if not media:
+        # Create new media
+        media_id = db.add_media(
+            name=name,
+            short_name=short_name,
+            mageia_version=version,
+            architecture=arch,
+            relative_path=relative_path,
+            is_official=is_official,
+            allow_unsigned=allow_unsigned,
+            enabled=not getattr(args, 'disabled', False),
+            update_media=getattr(args, 'update', False),
+            priority=50,
+            url=None  # No legacy URL needed with server/media model
+        )
+        media_created = True
+        print(f"  Created media '{name}' (id={media_id})")
+        media = {'id': media_id, 'name': name}
+    else:
+        print(f"  Using existing media '{media['name']}' (id={media['id']})")
+        media_id = media['id']
+
+    # --- Link server to media ---
+    if not db.server_media_link_exists(server['id'], media['id']):
+        db.link_server_media(server['id'], media['id'])
+        print(f"  Linked server '{server['name']}' -> media '{media['name']}'")
+    else:
+        print(f"  Link already exists: server '{server['name']}' -> media '{media['name']}'")
+
+    # Summary
+    print()
+    if server_created and media_created:
+        print(colors.success(f"Added media '{name}' with new server"))
+    elif media_created:
+        print(colors.success(f"Added media '{name}' to existing server"))
+    elif server_created:
+        print(colors.success(f"Added new server for existing media '{name}'"))
+    else:
+        print(colors.success(f"Linked existing server to existing media '{name}'"))
+
     return 0
 
 
@@ -1905,6 +2429,316 @@ def cmd_media_import(args, db: PackageDatabase) -> int:
         print(colors.info("\nRun 'urpm media update' to fetch package lists"))
 
     return 1 if errors else 0
+
+
+# =============================================================================
+# Server commands
+# =============================================================================
+
+def cmd_server_list(args, db: PackageDatabase) -> int:
+    """Handle server list command."""
+    from . import colors
+
+    show_all = getattr(args, 'all', False)
+    servers = db.list_servers(enabled_only=not show_all)
+
+    if not servers:
+        print(colors.info("No servers configured"))
+        return 0
+
+    # Header
+    print(f"\n{'Name':<25} {'Protocol':<8} {'Host':<30} {'Pri':>4} {'IP':>6} {'Status':<8}")
+    print("-" * 90)
+
+    for srv in servers:
+        status = colors.success("enabled") if srv['enabled'] else colors.dim("disabled")
+        ip_mode = srv.get('ip_mode', 'auto')
+        if ip_mode == 'dual':
+            ip_str = colors.success('dual')
+        elif ip_mode == 'ipv4':
+            ip_str = 'ipv4'
+        elif ip_mode == 'ipv6':
+            ip_str = colors.info('ipv6')
+        else:
+            ip_str = colors.dim('auto')
+
+        name = srv['name'][:24]
+        host = srv['host'][:29]
+        print(f"{name:<25} {srv['protocol']:<8} {host:<30} {srv['priority']:>4} {ip_str:>6} {status}")
+
+    print()
+    return 0
+
+
+def cmd_server_add(args, db: PackageDatabase) -> int:
+    """Handle server add command."""
+    from . import colors
+    from urllib.parse import urlparse
+    from ..core.config import test_server_ip_connectivity, build_server_url
+    import urllib.request
+    import socket
+
+    url = args.url.rstrip('/')
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ('http', 'https', 'file'):
+        print(colors.error(f"Invalid protocol: {parsed.scheme}"))
+        print("Supported protocols: http, https, file")
+        return 1
+
+    protocol = parsed.scheme
+    host = parsed.netloc or 'localhost'
+    base_path = parsed.path
+
+    # Check if server already exists
+    existing = db.get_server_by_location(protocol, host, base_path)
+    if existing:
+        print(colors.warning(f"Server already exists: {existing['name']}"))
+        return 1
+
+    # Check if name is taken
+    if db.get_server(args.name):
+        print(colors.error(f"Server name already exists: {args.name}"))
+        return 1
+
+    # Test IP connectivity for remote servers
+    ip_mode = 'auto'
+    if protocol in ('http', 'https'):
+        port = 443 if protocol == 'https' else 80
+        print(f"Testing connectivity to {host}...")
+        ip_mode = test_server_ip_connectivity(host, port, timeout=5.0)
+        print(f"  IP mode: {ip_mode}")
+
+    # Add server
+    is_official = not args.custom
+    enabled = not args.disabled
+    priority = args.priority
+
+    try:
+        server_id = db.add_server(
+            name=args.name,
+            protocol=protocol,
+            host=host,
+            base_path=base_path,
+            is_official=is_official,
+            enabled=enabled,
+            priority=priority
+        )
+        # Set detected ip_mode
+        db.set_server_ip_mode_by_id(server_id, ip_mode)
+
+        print(colors.success(f"Added server: {args.name}"))
+        print(f"  URL: {url}")
+        print(f"  Priority: {priority}")
+        print(f"  IP mode: {ip_mode}")
+        if not enabled:
+            print(colors.dim("  Status: disabled"))
+    except Exception as e:
+        print(colors.error(f"Failed to add server: {e}"))
+        return 1
+
+    # Scan existing media to see which ones this server provides
+    media_list = db.list_media()
+    if not media_list:
+        return 0
+
+    # Filter media with relative_path
+    media_to_scan = [(m['id'], m['name'], m.get('relative_path', ''))
+                     for m in media_list if m.get('relative_path')]
+
+    if not media_to_scan:
+        return 0
+
+    print(f"\nScanning {len(media_to_scan)} media...", end=' ', flush=True)
+
+    # Build base URL
+    server = {'protocol': protocol, 'host': host, 'base_path': base_path}
+    base_url = build_server_url(server)
+
+    if protocol == 'file':
+        # Local filesystem - fast sequential check
+        from pathlib import Path
+        found = []
+        for media_id, media_name, relative_path in media_to_scan:
+            md5_path = Path(base_path) / relative_path / "media_info" / "MD5SUM"
+            if md5_path.exists():
+                found.append((media_id, media_name))
+    else:
+        # Remote - parallel HEAD requests with ip_mode
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from ..core.config import get_socket_family_for_ip_mode
+
+        family = get_socket_family_for_ip_mode(ip_mode)
+
+        def check_media(media_id, media_name, relative_path):
+            test_url = f"{base_url}/{relative_path}/media_info/MD5SUM"
+            try:
+                # Patch getaddrinfo for this thread if needed
+                original_getaddrinfo = None
+                if family != 0:
+                    original_getaddrinfo = socket.getaddrinfo
+                    def patched(host, port, fam=0, type=0, proto=0, flags=0):
+                        if fam == 0:
+                            fam = family
+                        return original_getaddrinfo(host, port, fam, type, proto, flags)
+                    socket.getaddrinfo = patched
+
+                try:
+                    req = urllib.request.Request(test_url, method='HEAD')
+                    urllib.request.urlopen(req, timeout=3)
+                    return (media_id, media_name)
+                finally:
+                    if original_getaddrinfo:
+                        socket.getaddrinfo = original_getaddrinfo
+            except Exception:
+                return None
+
+        found = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(check_media, mid, mname, rpath): mname
+                      for mid, mname, rpath in media_to_scan}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    found.append(result)
+
+    # Link found media
+    for media_id, media_name in found:
+        db.link_server_media(server_id, media_id)
+
+    print(f"{len(found)} found")
+    if found:
+        for _, media_name in sorted(found, key=lambda x: x[1]):
+            print(f"  {colors.success('+')} {media_name}")
+    else:
+        print(colors.warning(f"No existing media found on this server"))
+
+    return 0
+
+
+def cmd_server_remove(args, db: PackageDatabase) -> int:
+    """Handle server remove command."""
+    from . import colors
+
+    server = db.get_server(args.name)
+    if not server:
+        print(colors.error(f"Server not found: {args.name}"))
+        return 1
+
+    db.remove_server(args.name)
+    print(colors.success(f"Removed server: {args.name}"))
+    return 0
+
+
+def cmd_server_enable(args, db: PackageDatabase) -> int:
+    """Handle server enable command."""
+    from . import colors
+
+    server = db.get_server(args.name)
+    if not server:
+        print(colors.error(f"Server not found: {args.name}"))
+        return 1
+
+    if server['enabled']:
+        print(colors.info(f"Server already enabled: {args.name}"))
+        return 0
+
+    db.enable_server(args.name, True)
+    print(colors.success(f"Enabled server: {args.name}"))
+    return 0
+
+
+def cmd_server_disable(args, db: PackageDatabase) -> int:
+    """Handle server disable command."""
+    from . import colors
+
+    server = db.get_server(args.name)
+    if not server:
+        print(colors.error(f"Server not found: {args.name}"))
+        return 1
+
+    if not server['enabled']:
+        print(colors.info(f"Server already disabled: {args.name}"))
+        return 0
+
+    db.enable_server(args.name, False)
+    print(colors.success(f"Disabled server: {args.name}"))
+    return 0
+
+
+def cmd_server_priority(args, db: PackageDatabase) -> int:
+    """Handle server priority command."""
+    from . import colors
+
+    server = db.get_server(args.name)
+    if not server:
+        print(colors.error(f"Server not found: {args.name}"))
+        return 1
+
+    db.set_server_priority(args.name, args.priority)
+    print(colors.success(f"Set priority for {args.name}: {args.priority}"))
+    return 0
+
+
+def cmd_server_test(args, db: PackageDatabase) -> int:
+    """Handle server test command - test connectivity and detect IP mode."""
+    from . import colors
+    from ..core.config import test_server_ip_connectivity
+
+    if args.name:
+        # Test specific server
+        server = db.get_server(args.name)
+        if not server:
+            print(colors.error(f"Server not found: {args.name}"))
+            return 1
+        servers = [server]
+    else:
+        # Test all enabled servers
+        servers = db.list_servers(enabled_only=True)
+
+    if not servers:
+        print(colors.info("No servers to test"))
+        return 0
+
+    errors = 0
+    for srv in servers:
+        if srv['protocol'] == 'file':
+            print(f"{srv['name']}: local filesystem (skipped)")
+            continue
+
+        host = srv['host']
+        port = 443 if srv['protocol'] == 'https' else 80
+        print(f"Testing {srv['name']} ({host})...", end=' ', flush=True)
+
+        old_mode = srv.get('ip_mode', 'auto')
+        new_mode = test_server_ip_connectivity(host, port, timeout=5.0)
+
+        if new_mode == 'auto':
+            # Could not test
+            print(colors.warning(f"unreachable (keeping {old_mode})"))
+            errors += 1
+        elif new_mode != old_mode:
+            db.set_server_ip_mode(srv['name'], new_mode)
+            print(colors.success(f"{new_mode} (was {old_mode})"))
+        else:
+            print(f"{new_mode}")
+
+    return 1 if errors else 0
+
+
+def cmd_server_ipmode(args, db: PackageDatabase) -> int:
+    """Handle server ip-mode command - manually set IP mode."""
+    from . import colors
+
+    server = db.get_server(args.name)
+    if not server:
+        print(colors.error(f"Server not found: {args.name}"))
+        return 1
+
+    old_mode = server.get('ip_mode', 'auto')
+    db.set_server_ip_mode(args.name, args.mode)
+    print(colors.success(f"Set IP mode for {args.name}: {args.mode} (was {old_mode})"))
+    return 0
 
 
 def cmd_cache_info(args, db: PackageDatabase) -> int:
@@ -2829,16 +3663,22 @@ def cmd_install(args, db: PackageDatabase) -> int:
     print(colors.info("\nDownloading packages..."))
     download_items = []
     media_cache = {}
+    servers_cache = {}  # media_id -> list of server dicts
 
     for action in result.actions:
         media_name = action.media_name
         if media_name not in media_cache:
             media = db.get_media(media_name)
-            media_cache[media_name] = media['url'] if media else ''
+            media_cache[media_name] = media
+            # Pre-load servers for this media (avoid SQLite threading issues)
+            if media and media.get('id'):
+                servers_cache[media['id']] = db.get_servers_for_media(
+                    media['id'], enabled_only=True
+                )
 
-        media_url = media_cache[media_name]
-        if not media_url:
-            print(f"  Warning: no URL for media '{media_name}'")
+        media = media_cache[media_name]
+        if not media:
+            print(f"  Warning: media '{media_name}' not found")
             continue
 
         # Parse EVR - remove epoch for filename
@@ -2847,15 +3687,36 @@ def cmd_install(args, db: PackageDatabase) -> int:
             evr = evr.split(':', 1)[1]
         version, release = evr.rsplit('-', 1) if '-' in evr else (evr, '1')
 
-        download_items.append(DownloadItem(
-            name=action.name,
-            version=version,
-            release=release,
-            arch=action.arch,
-            media_url=media_url,
-            media_name=media_name,
-            size=action.size
-        ))
+        # Use new schema if available, fallback to legacy URL
+        if media.get('relative_path'):
+            servers = servers_cache.get(media['id'], [])
+            # Convert sqlite3.Row to dict for thread safety
+            servers = [dict(s) for s in servers]
+            download_items.append(DownloadItem(
+                name=action.name,
+                version=version,
+                release=release,
+                arch=action.arch,
+                media_id=media['id'],
+                relative_path=media['relative_path'],
+                is_official=bool(media.get('is_official', 1)),
+                servers=servers,
+                media_name=media_name,
+                size=action.size
+            ))
+        elif media.get('url'):
+            # Legacy schema
+            download_items.append(DownloadItem(
+                name=action.name,
+                version=version,
+                release=release,
+                arch=action.arch,
+                media_url=media['url'],
+                media_name=media_name,
+                size=action.size
+            ))
+        else:
+            print(f"  Warning: no URL or servers for media '{media_name}'")
 
     # Download with progress
     use_peers = not getattr(args, 'no_peers', False)
@@ -3488,15 +4349,21 @@ def cmd_update(args, db: PackageDatabase) -> int:
         print(f"\nDownloading {len(to_download)} packages...")
         download_items = []
         media_cache = {}
+        servers_cache = {}  # media_id -> list of server dicts
 
         for action in to_download:
             media_name = action.media_name
             if media_name not in media_cache:
                 media = db.get_media(media_name)
-                media_cache[media_name] = media['url'] if media else ''
+                media_cache[media_name] = media
+                # Pre-load servers for this media
+                if media and media.get('id'):
+                    servers_cache[media['id']] = db.get_servers_for_media(
+                        media['id'], enabled_only=True
+                    )
 
-            media_url = media_cache[media_name]
-            if not media_url:
+            media = media_cache[media_name]
+            if not media:
                 continue
 
             # Parse EVR
@@ -3505,15 +4372,32 @@ def cmd_update(args, db: PackageDatabase) -> int:
                 evr = evr.split(':', 1)[1]
             version, release = evr.rsplit('-', 1) if '-' in evr else (evr, '1')
 
-            download_items.append(DownloadItem(
-                name=action.name,
-                version=version,
-                release=release,
-                arch=action.arch,
-                media_url=media_url,
-                media_name=media_name,
-                size=action.size
-            ))
+            # Use new schema if available, fallback to legacy URL
+            if media.get('relative_path'):
+                servers = servers_cache.get(media['id'], [])
+                servers = [dict(s) for s in servers]
+                download_items.append(DownloadItem(
+                    name=action.name,
+                    version=version,
+                    release=release,
+                    arch=action.arch,
+                    media_id=media['id'],
+                    relative_path=media['relative_path'],
+                    is_official=bool(media.get('is_official', 1)),
+                    servers=servers,
+                    media_name=media_name,
+                    size=action.size
+                ))
+            elif media.get('url'):
+                download_items.append(DownloadItem(
+                    name=action.name,
+                    version=version,
+                    release=release,
+                    arch=action.arch,
+                    media_url=media['url'],
+                    media_name=media_name,
+                    size=action.size
+                ))
 
         # Download
         use_peers = not getattr(args, 'no_peers', False)
@@ -7851,6 +8735,15 @@ def main(argv=None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
 
+    # Configure logging based on verbose flag
+    if getattr(args, 'verbose', False):
+        import logging
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(name)s - %(levelname)s - %(message)s',
+            stream=sys.stderr
+        )
+
     # Initialize color support
     from . import colors
     colors.init(nocolor=getattr(args, 'nocolor', False))
@@ -7908,7 +8801,27 @@ def main(argv=None) -> int:
                 return cmd_media_import(args, db)
             else:
                 return cmd_not_implemented(args, db)
-        
+
+        elif args.command in ('server', 'srv'):
+            if args.server_command in ('list', 'l', 'ls', None):
+                return cmd_server_list(args, db)
+            elif args.server_command in ('add', 'a'):
+                return cmd_server_add(args, db)
+            elif args.server_command in ('remove', 'r', 'rm'):
+                return cmd_server_remove(args, db)
+            elif args.server_command in ('enable', 'e'):
+                return cmd_server_enable(args, db)
+            elif args.server_command in ('disable', 'd'):
+                return cmd_server_disable(args, db)
+            elif args.server_command == 'priority':
+                return cmd_server_priority(args, db)
+            elif args.server_command in ('test', 't'):
+                return cmd_server_test(args, db)
+            elif args.server_command == 'ip-mode':
+                return cmd_server_ipmode(args, db)
+            else:
+                return cmd_not_implemented(args, db)
+
         elif args.command in ('cache', 'c'):
             if args.cache_command == 'info':
                 return cmd_cache_info(args, db)

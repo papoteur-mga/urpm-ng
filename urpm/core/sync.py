@@ -27,6 +27,8 @@ MD5SUM_PATH = "media_info/MD5SUM"
 
 # Re-export from config for backwards compatibility
 from .config import get_base_dir, get_hostname_from_url, get_media_dir
+# New v8 schema functions
+from .config import get_media_local_path, build_server_url, build_media_url, is_local_server
 
 
 def get_media_cache_dir(media_name: str, media_url: str, base_dir: Path = None) -> Path:
@@ -147,6 +149,113 @@ def build_md5sum_url(media_url: str) -> str:
     return f"{base}/{MD5SUM_PATH}"
 
 
+# =============================================================================
+# New v8 schema functions (server/media dicts)
+# =============================================================================
+
+def build_synthesis_url_v8(server: dict, media: dict) -> str:
+    """Build full URL for synthesis file using server/media model."""
+    base_url = build_media_url(server, media)
+    return f"{base_url}/{SYNTHESIS_PATH}"
+
+
+def build_hdlist_url_v8(server: dict, media: dict) -> str:
+    """Build full URL for hdlist file using server/media model."""
+    base_url = build_media_url(server, media)
+    return f"{base_url}/{HDLIST_PATH}"
+
+
+def build_md5sum_url_v8(server: dict, media: dict) -> str:
+    """Build full URL for MD5SUM file using server/media model."""
+    base_url = build_media_url(server, media)
+    return f"{base_url}/{MD5SUM_PATH}"
+
+
+def download_from_server(url: str, dest: Path, server: dict,
+                         progress_callback: Callable[[int, int], None] = None,
+                         timeout: int = 30) -> DownloadResult:
+    """Download a file from a server (handles both http(s) and file://).
+
+    Args:
+        url: Full URL or local path
+        dest: Destination path
+        server: Server dict (used to check if local)
+        progress_callback: Optional callback(downloaded_bytes, total_bytes)
+        timeout: Connection timeout in seconds
+
+    Returns:
+        DownloadResult with success status and metadata
+    """
+    if is_local_server(server):
+        # Local file copy
+        try:
+            source_path = Path(url)
+            if not source_path.exists():
+                return DownloadResult(success=False, error=f"File not found: {url}")
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            # Calculate MD5 while copying
+            md5_hash = hashlib.md5()
+            size = 0
+
+            with open(source_path, 'rb') as src, open(dest, 'wb') as dst:
+                while True:
+                    chunk = src.read(8192)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    md5_hash.update(chunk)
+                    size += len(chunk)
+                    if progress_callback:
+                        progress_callback(size, source_path.stat().st_size)
+
+            return DownloadResult(
+                success=True,
+                path=dest,
+                size=size,
+                md5=md5_hash.hexdigest()
+            )
+
+        except Exception as e:
+            return DownloadResult(success=False, error=str(e))
+    else:
+        # HTTP(S) download
+        return download_file(url, dest, progress_callback, timeout)
+
+
+def get_effective_media_url(db, media: dict) -> Tuple[Optional[dict], Optional[str]]:
+    """Get the best server and full media URL for a media.
+
+    Tries servers in priority order. Falls back to legacy media['url'] if no
+    servers are linked.
+
+    Args:
+        db: Database instance
+        media: Media dict
+
+    Returns:
+        Tuple of (server_dict or None, full_media_url or None)
+        If using legacy URL, server_dict is None
+    """
+    media_id = media['id']
+
+    # Try to get the best linked server
+    server = db.get_best_server_for_media(media_id)
+
+    if server:
+        # Use new model: server + media.relative_path
+        url = build_media_url(server, media)
+        return server, url
+
+    # Fallback to legacy URL in media table
+    if media.get('url'):
+        return None, media['url']
+
+    # No way to access this media
+    return None, None
+
+
 def parse_md5sum_file(content: str) -> dict:
     """Parse MD5SUM file content.
 
@@ -169,19 +278,37 @@ def parse_md5sum_file(content: str) -> dict:
 
 
 def check_media_update_needed(db: PackageDatabase, media_id: int,
-                              media_url: str) -> Tuple[bool, Optional[str]]:
+                              media_url: str,
+                              server: dict = None,
+                              media: dict = None) -> Tuple[bool, Optional[str]]:
     """Check if a media needs to be updated by comparing MD5.
+
+    Args:
+        db: Database instance
+        media_id: Media ID
+        media_url: Full URL to the media (for legacy compatibility)
+        server: Optional server dict (v8 schema, used for file:// handling)
+        media: Optional media dict (v8 schema)
 
     Returns:
         Tuple of (needs_update, new_md5)
     """
     try:
-        md5_url = build_md5sum_url(media_url)
+        # Build MD5SUM URL using new or legacy method
+        if server and media:
+            md5_url = build_md5sum_url_v8(server, media)
+        else:
+            md5_url = build_md5sum_url(media_url)
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp_path = Path(tmp.name)
 
-        result = download_file(md5_url, tmp_path)
+        # Download using appropriate method
+        if server:
+            result = download_from_server(md5_url, tmp_path, server)
+        else:
+            result = download_file(md5_url, tmp_path)
+
         if not result.success:
             tmp_path.unlink(missing_ok=True)
             return True, None  # Can't check, assume update needed
@@ -196,11 +323,11 @@ def check_media_update_needed(db: PackageDatabase, media_id: int,
             return True, None
 
         # Check against stored MD5
-        media = db.conn.execute(
+        media_row = db.conn.execute(
             "SELECT synthesis_md5 FROM media WHERE id = ?", (media_id,)
         ).fetchone()
 
-        if media and media['synthesis_md5'] == synthesis_md5:
+        if media_row and media_row['synthesis_md5'] == synthesis_md5:
             return False, synthesis_md5  # No update needed
 
         return True, synthesis_md5
@@ -216,6 +343,7 @@ def sync_media(db: PackageDatabase, media_name: str,
     """Synchronize a media source.
 
     Downloads synthesis (and optionally hdlist), parses and imports into DB.
+    Supports both v8 schema (server/media) and legacy (media.url) models.
 
     Args:
         db: Database instance
@@ -234,16 +362,19 @@ def sync_media(db: PackageDatabase, media_name: str,
     if not media['enabled']:
         return SyncResult(success=False, error=f"Media '{media_name}' is disabled")
 
-    media_url = media['url']
-    if not media_url:
-        # TODO: Handle mirrorlist
-        return SyncResult(success=False, error="Mirrorlist not yet supported")
-
     media_id = media['id']
+
+    # Get server and URL (v8 schema or legacy fallback)
+    server, media_url = get_effective_media_url(db, media)
+
+    if not media_url:
+        return SyncResult(success=False, error=f"No server available for '{media_name}'")
 
     # Check if update needed
     if not force:
-        needs_update, new_md5 = check_media_update_needed(db, media_id, media_url)
+        needs_update, new_md5 = check_media_update_needed(
+            db, media_id, media_url, server=server, media=media
+        )
         if not needs_update:
             if progress_callback:
                 progress_callback("up-to-date", 0, 0)
@@ -257,14 +388,23 @@ def sync_media(db: PackageDatabase, media_name: str,
         if progress_callback:
             progress_callback("downloading synthesis", 0, 0)
 
-        synthesis_url = build_synthesis_url(media_url)
+        # Build synthesis URL (v8 or legacy)
+        if server:
+            synthesis_url = build_synthesis_url_v8(server, media)
+        else:
+            synthesis_url = build_synthesis_url(media_url)
+
         synthesis_path = tmpdir / "synthesis.hdlist.cz"
 
         def dl_progress(current, total):
             if progress_callback:
                 progress_callback("downloading synthesis", current, total)
 
-        result = download_file(synthesis_url, synthesis_path, dl_progress)
+        # Download using appropriate method (http/https or file://)
+        if server:
+            result = download_from_server(synthesis_url, synthesis_path, server, dl_progress)
+        else:
+            result = download_file(synthesis_url, synthesis_path, dl_progress)
 
         if not result.success:
             return SyncResult(
@@ -280,14 +420,22 @@ def sync_media(db: PackageDatabase, media_name: str,
             if progress_callback:
                 progress_callback("downloading hdlist", 0, 0)
 
-            hdlist_url = build_hdlist_url(media_url)
+            if server:
+                hdlist_url = build_hdlist_url_v8(server, media)
+            else:
+                hdlist_url = build_hdlist_url(media_url)
+
             hdlist_path = tmpdir / "hdlist.cz"
 
             def hdl_progress(current, total):
                 if progress_callback:
                     progress_callback("downloading hdlist", current, total)
 
-            hdl_result = download_file(hdlist_url, hdlist_path, hdl_progress)
+            if server:
+                hdl_result = download_from_server(hdlist_url, hdlist_path, server, hdl_progress)
+            else:
+                hdl_result = download_file(hdlist_url, hdlist_path, hdl_progress)
+
             hdlist_downloaded = hdl_result.success
 
         # Clear old packages from this media
@@ -320,9 +468,16 @@ def sync_media(db: PackageDatabase, media_name: str,
                 error=f"Failed to parse synthesis: {e}"
             )
 
-        # Copy files to permanent cache (mirrors structure)
-        # Structure: <base_dir>/medias/<hostname>/<media_name>/media_info/
-        cache_media_dir = get_media_cache_dir(media_name, media_url)
+        # Copy files to permanent cache
+        # v8 schema: official/<relative_path>/ or custom/<short_name>/
+        # Legacy: <hostname>/<media_name>/
+        if media.get('relative_path'):
+            # v8 schema - use new path structure
+            cache_media_dir = get_media_local_path(media)
+        else:
+            # Legacy - use old hostname-based structure
+            cache_media_dir = get_media_cache_dir(media_name, media_url)
+
         cache_media_info = cache_media_dir / "media_info"
         cache_media_info.mkdir(parents=True, exist_ok=True)
 
@@ -336,9 +491,18 @@ def sync_media(db: PackageDatabase, media_name: str,
             shutil.copy2(tmpdir / "hdlist.cz", cache_hdlist)
 
         # Download and copy MD5SUM
-        md5sum_url = build_md5sum_url(media_url)
+        if server:
+            md5sum_url = build_md5sum_url_v8(server, media)
+        else:
+            md5sum_url = build_md5sum_url(media_url)
+
         md5sum_path = tmpdir / "MD5SUM"
-        md5_result = download_file(md5sum_url, md5sum_path)
+
+        if server:
+            md5_result = download_from_server(md5sum_url, md5sum_path, server)
+        else:
+            md5_result = download_file(md5sum_url, md5sum_path)
+
         if md5_result.success:
             shutil.copy2(md5sum_path, cache_media_info / "MD5SUM")
 

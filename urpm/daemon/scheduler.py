@@ -234,7 +234,7 @@ class Scheduler:
             logger.warning("No database connection")
             return
 
-        from ..core.config import get_hostname_from_url
+        from ..core.config import get_hostname_from_url, get_media_local_path
 
         # Check each enabled media
         media_list = self.db.list_media()
@@ -245,19 +245,41 @@ class Scheduler:
                 continue
 
             name = media['name']
+            relative_path = media.get('relative_path', '')
             url = media.get('url', '')
 
-            if not url:
+            # Get local synthesis file path
+            # New schema: <base_dir>/medias/official/<relative_path>/media_info/synthesis.hdlist.cz
+            # Legacy: <base_dir>/medias/<hostname>/<media_name>/media_info/synthesis.hdlist.cz
+            if relative_path:
+                media_dir = get_media_local_path(media)
+                local_synthesis = media_dir / "media_info" / "synthesis.hdlist.cz"
+            elif url:
+                hostname = get_hostname_from_url(url)
+                local_synthesis = self.base_dir / "medias" / hostname / name / "media_info" / "synthesis.hdlist.cz"
+            else:
+                logger.debug(f"Media {name}: no relative_path or url, skipping")
                 continue
 
-            # Get local synthesis file path
-            # Structure: <base_dir>/medias/<hostname>/<media_name>/media_info/synthesis.hdlist.cz
-            hostname = get_hostname_from_url(url)
-            local_synthesis = self.base_dir / "medias" / hostname / name / "media_info" / "synthesis.hdlist.cz"
             logger.debug(f"Media {name}: checking local={local_synthesis}")
 
             # Build synthesis URL
-            synthesis_url = url.rstrip('/') + '/media_info/synthesis.hdlist.cz'
+            # New schema: use server + relative_path
+            # Legacy: use media.url directly
+            if relative_path:
+                # Get best server for this media
+                server = self.db.get_best_server_for_media(media['id'])
+                if server:
+                    from ..core.config import build_media_url
+                    base_url = build_media_url(server, media)
+                    synthesis_url = f"{base_url}/media_info/synthesis.hdlist.cz"
+                elif url:
+                    synthesis_url = url.rstrip('/') + '/media_info/synthesis.hdlist.cz'
+                else:
+                    logger.debug(f"Media {name}: no server available, skipping")
+                    continue
+            else:
+                synthesis_url = url.rstrip('/') + '/media_info/synthesis.hdlist.cz'
             logger.debug(f"Media {name}: remote={synthesis_url}")
 
             # Check if synthesis has changed using HTTP HEAD vs local file
@@ -391,19 +413,23 @@ class Scheduler:
         if not self.db:
             return
 
-        downloader = Downloader(cache_dir=self.base_dir)
+        downloader = Downloader(cache_dir=self.base_dir, db=self.db)
 
-        # Cache media URLs to avoid repeated DB lookups
-        media_urls = {}
+        # Cache media info and servers to avoid repeated DB lookups
+        media_cache = {}
+        servers_cache = {}
         for media in self.db.list_media():
-            media_urls[media['name']] = media.get('url', '')
+            media_cache[media['name']] = media
+            if media.get('id'):
+                servers = self.db.get_servers_for_media(media['id'], enabled_only=True)
+                servers_cache[media['id']] = [dict(s) for s in servers]
 
         items = []
         for update in updates:
             media_name = update.get('media_name', '')
-            media_url = media_urls.get(media_name, '')
-            if not media_url:
-                logger.debug(f"No media URL for {update['name']} (media={media_name})")
+            media = media_cache.get(media_name)
+            if not media:
+                logger.debug(f"No media for {update['name']} (media={media_name})")
                 continue
 
             # Parse EVR to extract version and release
@@ -417,30 +443,56 @@ class Scheduler:
                 version = evr
                 release = '1'
 
-            items.append(DownloadItem(
-                name=update['name'],
-                version=version,
-                release=release,
-                arch=update['arch'],
-                media_url=media_url,
-                media_name=media_name,
-                size=update.get('size', 0),
-            ))
+            # Use new schema if available, fallback to legacy URL
+            if media.get('relative_path'):
+                servers = servers_cache.get(media['id'], [])
+                items.append(DownloadItem(
+                    name=update['name'],
+                    version=version,
+                    release=release,
+                    arch=update['arch'],
+                    media_id=media['id'],
+                    relative_path=media['relative_path'],
+                    is_official=bool(media.get('is_official', 1)),
+                    servers=servers,
+                    media_name=media_name,
+                    size=update.get('size', 0),
+                ))
+            elif media.get('url'):
+                items.append(DownloadItem(
+                    name=update['name'],
+                    version=version,
+                    release=release,
+                    arch=update['arch'],
+                    media_url=media['url'],
+                    media_name=media_name,
+                    size=update.get('size', 0),
+                ))
 
         if items:
-            # Download with progress logging
+            # Download with progress logging (rate-limited)
             # Callback signature: (name, pkg_num, pkg_total, bytes_done, bytes_total,
             #                      item_bytes, item_total, active_downloads)
+            last_log = [0, 0]  # [last_pct, last_pkg_num]
+
             def progress_callback(name, pkg_num, pkg_total, bytes_done, bytes_total,
                                   item_bytes=None, item_total=None, active_downloads=None):
                 if bytes_total > 0:
                     pct = bytes_done * 100 // bytes_total
-                    logger.debug(f"Pre-downloading {name}: {pct}% ({pkg_num}/{pkg_total})")
+                    # Only log when percentage changes by 5% or new package
+                    if pct >= last_log[0] + 5 or pkg_num != last_log[1]:
+                        logger.debug(f"Pre-downloading {name}: {pct}% ({pkg_num}/{pkg_total})")
+                        last_log[0] = pct
+                        last_log[1] = pkg_num
 
             results, downloaded, cached, peer_stats = downloader.download_all(items, progress_callback)
             errors = [r for r in results if not r.success]
             logger.info(f"Pre-download complete: {downloaded} downloaded, "
                        f"{cached} cached, {len(errors)} errors")
+
+            # Invalidate RPM index so peers see new packages
+            if downloaded > 0:
+                self.daemon.invalidate_rpm_index()
 
     def _run_cache_cleanup(self):
         """Clean up old cached packages."""

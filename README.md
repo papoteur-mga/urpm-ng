@@ -306,12 +306,59 @@ urpm rollback to <date>       # Rollback to a date (YYYY-MM-DD)
 
 ```bash
 urpm media list               # List configured media
-urpm media add <name> <url>   # Add a media source
+urpm media add <url>          # Add official Mageia media (auto-parsed)
+urpm media add --custom "Name" shortname <url>  # Add custom/third-party media
 urpm media remove <name>      # Remove a media source
 urpm media enable <name>      # Enable a media
 urpm media disable <name>     # Disable a media
 urpm media update [name]      # Update media metadata
 urpm media import <file>      # Import from urpmi.cfg
+```
+
+Examples:
+```bash
+# Add official Mageia media (server and media auto-detected)
+urpm media add https://ftp.belnet.be/mageia/distrib/9/x86_64/media/core/release/
+
+# Add custom third-party media
+urpm media add --custom "RPM Fusion" rpmfusion https://download1.rpmfusion.org/free/fedora/40/x86_64/os/
+```
+
+## Server Management
+
+Servers are mirror sources that can serve multiple media. urpm supports multiple servers per media for load balancing and failover.
+
+```bash
+urpm server list              # List configured servers
+urpm server add <name> <url>  # Add a server (tests IP and scans media)
+urpm server remove <name>     # Remove a server
+urpm server enable <name>     # Enable a server
+urpm server disable <name>    # Disable a server
+urpm server priority <name> <n>  # Set server priority (higher = preferred)
+urpm server test [name]       # Test connectivity and detect IP mode
+urpm server ip-mode <name> <mode>  # Set IP mode (auto/ipv4/ipv6/dual)
+```
+
+### IP Mode
+
+Each server has an IP mode to handle IPv4/IPv6 connectivity:
+- `auto` - Let system decide (may cause 30s timeout if IPv6 fails)
+- `ipv4` - Force IPv4 only
+- `ipv6` - Force IPv6 only
+- `dual` - Both work, prefer IPv4 (recommended for dual-stack servers)
+
+IP mode is auto-detected when adding a server. Use `server test` to re-detect or `server ip-mode` to set manually.
+
+## Peer Management
+
+When urpmd is running on multiple machines on the same LAN, they discover each other and share cached packages (P2P).
+
+```bash
+urpm peer list                # List discovered peers
+urpm peer downloads           # Show download statistics from peers
+urpm peer blacklist <host>    # Block a peer (e.g., if providing bad packages)
+urpm peer unblacklist <host>  # Unblock a peer
+urpm peer clean               # Remove stale/offline peers from list
 ```
 
 ## Cache Management
