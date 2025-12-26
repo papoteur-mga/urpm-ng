@@ -10,11 +10,14 @@ Mode detection:
 PROD mode: /var/lib/urpm/
 DEV mode:  /var/lib/urpm-dev/
 
-Structure:
-    <base_dir>/packages.db                              - Package database
-    <base_dir>/medias/<hostname>/<media>/               - Media mirror
-    <base_dir>/medias/<hostname>/<media>/media_info/    - Synthesis, hdlist, MD5SUM
-    <base_dir>/medias/<hostname>/<media>/*.rpm          - Mirrored RPMs (served to peers)
+Directory structure:
+    <base_dir>/packages.db                                              - Package database
+    <base_dir>/medias/official/<version>/<arch>/media/<type>/<release>/ - Official media
+    <base_dir>/medias/custom/<short_name>/                              - Custom/third-party media
+
+    Example: <base_dir>/medias/official/10/x86_64/media/core/release/
+             <base_dir>/medias/official/10/x86_64/media/core/release/media_info/synthesis.hdlist.cz
+             <base_dir>/medias/official/10/x86_64/media/core/release/*.rpm
 
 .urpm.local format (optional, one setting per line):
     base_dir=/path/to/custom/dir
@@ -181,29 +184,30 @@ def get_db_path(dev_mode: bool = None) -> Path:
     return _detect_mode()['db_path']
 
 
+# =============================================================================
+# DEPRECATED - Old hostname-based path functions (kept for migration/compat)
+# =============================================================================
+
 def get_media_dir(base_dir: Path, hostname: str, media_name: str) -> Path:
-    """Get media cache directory.
+    """DEPRECATED: Use get_media_local_path() instead.
 
-    Args:
-        base_dir: Base urpm directory
-        hostname: Server hostname
-        media_name: Media name
-
-    Returns:
-        Path: <base_dir>/medias/<hostname>/<media_name>/
+    Old structure: <base_dir>/medias/<hostname>/<media_name>/
+    New structure: <base_dir>/medias/official/<relative_path>/
     """
+    import warnings
+    warnings.warn("get_media_dir() is deprecated, use get_media_local_path()", DeprecationWarning)
     return base_dir / "medias" / hostname / media_name
 
 
 def get_hostname_from_url(url: str) -> str:
-    """Extract hostname from a URL for cache organization."""
+    """DEPRECATED: No longer needed with new media structure."""
     from urllib.parse import urlparse
     parsed = urlparse(url)
     return parsed.netloc or "local"
 
 
 # =============================================================================
-# New media/server path functions (v8 schema)
+# Media/server path functions
 # =============================================================================
 
 def get_media_local_path(media: dict, base_dir: Path = None) -> Path:

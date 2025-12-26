@@ -211,6 +211,18 @@ class Resolver:
                     repo.add_mdk(f)
                     f.close()
                     Path(tmp_path).unlink()
+
+                    # Populate _solvable_to_pkg mapping for the loaded packages
+                    for s in repo.solvables:
+                        self._solvable_to_pkg[s.id] = {
+                            'name': s.name,
+                            'evr': s.evr,
+                            'arch': s.arch,
+                            'nevra': f"{s.name}-{s.evr}.{s.arch}",
+                            'summary': s.lookup_str(solv.SOLVABLE_SUMMARY) or "",
+                            'size': s.lookup_num(solv.SOLVABLE_INSTALLSIZE) or 0,
+                            'media_name': repo.name,
+                        }
                 except Exception as e:
                     if DEBUG_RESOLVER:
                         print(f"[RESOLVER] Failed to load synthesis for {media['name']}: {e}")

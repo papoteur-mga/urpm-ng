@@ -25,25 +25,20 @@ HDLIST_PATH = "media_info/hdlist.cz"
 MD5SUM_PATH = "media_info/MD5SUM"
 
 
-# Re-export from config for backwards compatibility
-from .config import get_base_dir, get_hostname_from_url, get_media_dir
-# New v8 schema functions
-from .config import get_media_local_path, build_server_url, build_media_url, is_local_server
+# Import from config
+from .config import get_base_dir, get_media_local_path, build_server_url, build_media_url, is_local_server
+# Deprecated imports (kept for migration)
+from .config import get_hostname_from_url, get_media_dir
 
 
 def get_media_cache_dir(media_name: str, media_url: str, base_dir: Path = None) -> Path:
-    """Get cache directory for a media.
+    """DEPRECATED: Use get_media_local_path() instead.
 
-    Structure: <base_dir>/medias/<hostname>/<media_name>/
-
-    Args:
-        media_name: Name of the media
-        media_url: URL of the media (used to extract hostname)
-        base_dir: Base directory (default: auto-detect based on PROD/DEV mode)
-
-    Returns:
-        Path to media cache directory
+    This function uses the old hostname-based structure.
+    New code should use get_media_local_path(media_dict).
     """
+    import warnings
+    warnings.warn("get_media_cache_dir() is deprecated, use get_media_local_path()", DeprecationWarning)
     if base_dir is None:
         base_dir = get_base_dir()
     hostname = get_hostname_from_url(media_url)

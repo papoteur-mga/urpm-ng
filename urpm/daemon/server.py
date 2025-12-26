@@ -142,84 +142,88 @@ class UrpmdHandler(BaseHTTPRequestHandler):
     def handle_media_files(self, path: str):
         """Serve media files and directory listings.
 
-        URL structure:
-            /media/                              → list hostnames
-            /media/<hostname>/                   → list media for this host
-            /media/<hostname>/<media>/           → list files (RPMs)
-            /media/<hostname>/<media>/media_info/→ list metadata files
-            /media/<hostname>/<media>/<file>     → serve file
+        URL structure (hierarchical navigation of medias/ directory):
+            /media/                    → list top-level dirs (official, custom)
+            /media/official/           → list versions (10, 9, ...)
+            /media/official/10/        → list architectures (x86_64, i686)
+            /media/official/10/x86_64/ → continue navigating...
+            /media/.../file.rpm        → serve file
+
+        The path structure mirrors the local cache:
+            <base_dir>/medias/official/<version>/<arch>/media/<type>/<release>/
         """
         if not self.daemon:
             self.send_error_json(500, "Daemon not initialized")
             return
 
-        # Parse path: /media/[hostname]/[media]/[subpath]
+        # Parse path: /media/[level1]/[level2]/[subpath]
+        # With new structure: level1=official/custom, level2=version, subpath=arch/...
         parts = path.split('/')
-        # parts[0] = '', parts[1] = 'media', parts[2] = hostname, etc.
+        # parts[0] = '', parts[1] = 'media', parts[2] = level1, etc.
 
         if len(parts) <= 2 or (len(parts) == 3 and parts[2] == ''):
-            # /media/ → list hostnames
-            self._list_hostnames()
+            # /media/ → list top-level directories
+            self._list_top_level()
         elif len(parts) == 3 or (len(parts) == 4 and parts[3] == ''):
-            # /media/<hostname>/ → list media for this host
-            hostname = parts[2]
-            self._list_media_for_host(hostname)
+            # /media/<level1>/ → list subdirectories
+            level1 = parts[2]
+            self._list_subdirs(level1)
         else:
-            # /media/<hostname>/<media>/... → directory or file
-            hostname = parts[2]
-            media_name = parts[3]
+            # /media/<level1>/<level2>/... → navigate deeper or serve file
+            level1 = parts[2]
+            level2 = parts[3]
             subpath = '/'.join(parts[4:]) if len(parts) > 4 else ''
-            self._serve_media_path(hostname, media_name, subpath)
+            self._serve_path(level1, level2, subpath)
 
-    def _list_hostnames(self):
-        """List available hostnames (mirror sources)."""
+    def _list_top_level(self):
+        """List top-level directories (official, custom)."""
         medias_dir = self.daemon.base_dir / "medias"
 
         if not medias_dir.exists():
-            self.send_json({'hostnames': [], 'count': 0})
+            self.send_json({'directories': [], 'count': 0})
             return
 
-        hostnames = []
+        dirs = []
         for entry in sorted(medias_dir.iterdir()):
             if entry.is_dir():
-                hostnames.append(entry.name)
+                dirs.append(entry.name)
 
         # Check Accept header for response format
         accept = self.headers.get('Accept', '')
         if 'text/html' in accept or 'application/json' not in accept:
-            self._send_directory_html('/', hostnames, is_root=True)
+            self._send_directory_html('/', dirs, is_root=True)
         else:
-            self.send_json({'hostnames': hostnames, 'count': len(hostnames)})
+            self.send_json({'directories': dirs, 'count': len(dirs)})
 
-    def _list_media_for_host(self, hostname: str):
-        """List media available for a specific hostname."""
-        host_dir = self.daemon.base_dir / "medias" / hostname
+    def _list_subdirs(self, parent: str):
+        """List subdirectories of a parent directory."""
+        parent_dir = self.daemon.base_dir / "medias" / parent
 
-        if not host_dir.exists():
-            self.send_error_json(404, f"Unknown host: {hostname}")
+        if not parent_dir.exists():
+            self.send_error_json(404, f"Not found: {parent}")
             return
 
-        media_names = []
-        for entry in sorted(host_dir.iterdir()):
+        subdirs = []
+        for entry in sorted(parent_dir.iterdir()):
             if entry.is_dir():
-                media_names.append(entry.name)
+                subdirs.append(entry.name)
 
         accept = self.headers.get('Accept', '')
         if 'text/html' in accept or 'application/json' not in accept:
-            self._send_directory_html(f'/{hostname}/', media_names)
+            self._send_directory_html(f'/{parent}/', subdirs)
         else:
-            self.send_json({'hostname': hostname, 'media': media_names, 'count': len(media_names)})
+            self.send_json({'path': parent, 'directories': subdirs, 'count': len(subdirs)})
 
-    def _serve_media_path(self, hostname: str, media_name: str, subpath: str):
-        """Serve a file or directory listing within a media."""
-        media_dir = self.daemon.base_dir / "medias" / hostname / media_name
-        target_path = media_dir / subpath if subpath else media_dir
+    def _serve_path(self, level1: str, level2: str, subpath: str):
+        """Serve a file or directory listing."""
+        base_dir = self.daemon.base_dir / "medias" / level1 / level2
+        target_path = base_dir / subpath if subpath else base_dir
 
         # Security: prevent path traversal
         try:
             target_path = target_path.resolve()
-            media_dir_resolved = media_dir.resolve()
-            if not str(target_path).startswith(str(media_dir_resolved)):
+            base_dir_resolved = base_dir.resolve()
+            if not str(target_path).startswith(str(base_dir_resolved)):
                 self.send_error_json(403, "Access denied")
                 return
         except (OSError, ValueError):
@@ -227,15 +231,15 @@ class UrpmdHandler(BaseHTTPRequestHandler):
             return
 
         if not target_path.exists():
-            self.send_error_json(404, f"Not found: {subpath or media_name}")
+            self.send_error_json(404, f"Not found: {level1}/{level2}/{subpath}" if subpath else f"{level1}/{level2}")
             return
 
         if target_path.is_dir():
-            self._send_directory_listing(target_path, hostname, media_name, subpath)
+            self._send_directory_listing(target_path, level1, level2, subpath)
         else:
             self._send_file(target_path)
 
-    def _send_directory_listing(self, dir_path: Path, hostname: str, media_name: str, subpath: str):
+    def _send_directory_listing(self, dir_path: Path, level1: str, level2: str, subpath: str):
         """Send directory listing as JSON or HTML."""
         entries = []
         for entry in sorted(dir_path.iterdir()):
@@ -249,15 +253,13 @@ class UrpmdHandler(BaseHTTPRequestHandler):
         accept = self.headers.get('Accept', '')
         if 'text/html' in accept or 'application/json' not in accept:
             names = [e['name'] + ('/' if e['type'] == 'dir' else '') for e in entries]
-            current_path = f'/{hostname}/{media_name}'
+            current_path = f'/{level1}/{level2}'
             if subpath:
                 current_path += f'/{subpath}'
             self._send_directory_html(current_path, names)
         else:
             self.send_json({
-                'hostname': hostname,
-                'media': media_name,
-                'path': subpath or '/',
+                'path': f'{level1}/{level2}/{subpath}' if subpath else f'{level1}/{level2}',
                 'entries': entries,
                 'count': len(entries),
             })
@@ -428,7 +430,8 @@ class UrpmdHandler(BaseHTTPRequestHandler):
         Response:
             {
                 "available": [
-                    {"filename": "foo-1.0-1.mga10.x86_64.rpm", "size": 12345, "path": "hostname/media/foo-1.0-1.mga10.x86_64.rpm"}
+                    {"filename": "foo-1.0-1.mga10.x86_64.rpm", "size": 12345,
+                     "path": "official/10/x86_64/media/core/release/foo-1.0-1.mga10.x86_64.rpm"}
                 ],
                 "missing": ["bar-2.0-1.mga10.x86_64.rpm"],
                 "available_count": 1,

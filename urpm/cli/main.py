@@ -2932,28 +2932,39 @@ def cmd_cache_stats(args, db: PackageDatabase) -> int:
         total_rpms = 0
         total_size = 0
 
-        # Count by hostname/media
-        for hostname_dir in medias_dir.iterdir():
-            if not hostname_dir.is_dir():
-                continue
-            for media_dir in hostname_dir.iterdir():
-                if not media_dir.is_dir():
+        # Find all RPMs recursively, group by parent directory
+        from collections import defaultdict
+        dir_stats = defaultdict(lambda: {'count': 0, 'size': 0})
+
+        for rpm_path in medias_dir.rglob("*.rpm"):
+            if rpm_path.is_file():
+                try:
+                    size = rpm_path.stat().st_size
+                    # Get relative path from medias_dir
+                    rel_path = rpm_path.relative_to(medias_dir)
+                    # Use parent dir as key (e.g., official/10/x86_64/media/core/release)
+                    parent_key = str(rel_path.parent)
+                    dir_stats[parent_key]['count'] += 1
+                    dir_stats[parent_key]['size'] += size
+                    total_rpms += 1
+                    total_size += size
+                except OSError:
                     continue
-                rpms = list(media_dir.glob("*.rpm"))
-                if rpms:
-                    rpm_count = len(rpms)
-                    rpm_size = sum(f.stat().st_size for f in rpms)
-                    total_rpms += rpm_count
-                    total_size += rpm_size
 
-                    if rpm_size > 1024 * 1024 * 1024:
-                        size_str = f"{rpm_size / 1024 / 1024 / 1024:.1f} GB"
-                    elif rpm_size > 1024 * 1024:
-                        size_str = f"{rpm_size / 1024 / 1024:.1f} MB"
-                    else:
-                        size_str = f"{rpm_size / 1024:.1f} KB"
+        # Display sorted by path
+        for path_key in sorted(dir_stats.keys()):
+            stats = dir_stats[path_key]
+            rpm_size = stats['size']
+            rpm_count = stats['count']
 
-                    print(f"  {hostname_dir.name}/{media_dir.name}: {rpm_count} RPMs ({size_str})")
+            if rpm_size > 1024 * 1024 * 1024:
+                size_str = f"{rpm_size / 1024 / 1024 / 1024:.1f} GB"
+            elif rpm_size > 1024 * 1024:
+                size_str = f"{rpm_size / 1024 / 1024:.1f} MB"
+            else:
+                size_str = f"{rpm_size / 1024:.1f} KB"
+
+            print(f"  {path_key}: {rpm_count} RPMs ({size_str})")
 
         if total_size > 1024 * 1024 * 1024:
             total_str = f"{total_size / 1024 / 1024 / 1024:.1f} GB"

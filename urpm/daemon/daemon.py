@@ -330,10 +330,12 @@ class UrpmDaemon:
     def check_have_packages(self, packages: List[str]) -> Dict[str, Any]:
         """Check which packages are available in local cache.
 
-        Searches recursively for RPM files. Supports both old structure
-        (hostname/media/) and new structure (official/version/arch/...).
-        The Mageia version is encoded in the filename (.mga10., .mga9., etc.)
-        so packages won't be confused across versions.
+        Searches recursively for RPM files in medias/ directory.
+        Structure: official/<version>/<arch>/media/<type>/<release>/*.rpm
+
+        The Mageia version and architecture are encoded in the RPM filename
+        (e.g., foo-1.0-1.mga10.x86_64.rpm) so packages from different
+        versions/architectures won't be confused.
 
         Args:
             packages: List of RPM filenames to check
