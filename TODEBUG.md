@@ -48,6 +48,14 @@ Le pre-downloading fonctionne via urpmd scheduler.
 ### Souci d'alignement dans urpm h - CORRIGÉ
 Les entêtes sont maintenant alignées avec les données.
 
+### Performance démarrage install/upgrade - CORRIGÉ
+Le chargement du pool libsolv était lent (~2-3s).
+Optimisation : utilisation des méthodes natives libsolv au lieu de Python :
+- `add_rpmdb()` : 0.1s au lieu de 0.5s
+- `add_mdk()` : 0.25s au lieu de 1.35s
+Temps total divisé par ~5 (de ~1.9s à ~0.35s pour la création du pool).
+Commit : 1e5f4a7
+
 ---
 
 ## En cours / À faire
