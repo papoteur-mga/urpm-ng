@@ -1,128 +1,122 @@
-# Performance de why
+# TODEBUG - Bugs et améliorations à traiter
 
-La commande `why` utilise `_get_rdeps()` qui itère sur tous les paquets installés pour chaque niveau du BFS.
-Contrairement à `rdepends --hide-uninstalled` qui pré-construit le graphe en une passe, `why` fait des lookups répétés.
+## Corrigés ✅
 
-A optimiser : utiliser `_build_rdeps_graph()` pour `why` aussi.
+### why et rdepends - CORRIGÉ
+Les commandes `why` et `rdepends` fonctionnent maintenant correctement :
+- Filtrage des provides virtuels
+- Affichage avec couleurs selon type de dépendance (R/r/s)
+- Option `--hide-uninstalled` pour ne montrer que les chemins vers paquets installés
+Commits : cc1a6d0, a8dca7d, cd49a44
 
-# why et rdepends pas fonctionels (partiellement résolu)
+### Gestion des peers colors.warn - CORRIGÉ
+Le module utilise maintenant `colors.warning()` partout.
 
-./bin/urpm why xwininfo
-xwininfo: installed as dependency
+### Aliases recommends/suggests - CORRIGÉ
+Ajoutés : `urpm recommends`, `urpm whatrecommends`, `urpm suggests`, `urpm whatsuggests`
+Commit : d2c5815
 
-Required by 1 explicit package(s):
+### Listes tronquées "... and xxx more" - CORRIGÉ
+Options ajoutées : `--show-all`, `--flat`, `--json`
+Affichage multi-colonnes automatique.
+Commit : ad4a586
 
-  libpwquality-tools (via xscreensaver-base → xscreensaver) <-- WTFF ?
-
-urpmq --whatrequires xwininfo
-joy2key
-kim4
-x11-tools
-xscreensaver-base
-xscreensaver-base
-xwininfo
-
-urpmq --whatrequires xscreensaver-base
-xscreensaver
-xscreensaver-base
-
-urpmq --whatrequires xscreensaver
-fvwm-crystal
-task-lxde
-xscreensaver
-
-urpmq --whatrequires task-lxde
-task-lxde
-
-=> LXDE et ton why il ne le trouve pas!!
-
-./bin/urpm rdepends xscreensaver
-Packages that depend on xscreensaver: 48
-
-  fvwm-crystal
-  libreoffice-langpack-af <-- ces libreoffice n'ont absolument rien à faire là 
-  libreoffice-langpack-be
-  libreoffice-langpack-bg
-  libreoffice-langpack-br
-  libreoffice-langpack-ca
-  libreoffice-langpack-cs
-  libreoffice-langpack-cy
-  libreoffice-langpack-da
-  libreoffice-langpack-de
-  libreoffice-langpack-el
-  libreoffice-langpack-en
-  libreoffice-langpack-eo
-  libreoffice-langpack-es
-  libreoffice-langpack-et
-  libreoffice-langpack-eu
-  libreoffice-langpack-fi
-  libreoffice-langpack-fr
-  libreoffice-langpack-fy
-  libreoffice-langpack-gl
-  libreoffice-langpack-hr
-  libreoffice-langpack-hu
-  libreoffice-langpack-id
-  libreoffice-langpack-it
-  libreoffice-langpack-lt
-  libreoffice-langpack-lv
-  libreoffice-langpack-nb
-  libreoffice-langpack-nl
-  libreoffice-langpack-nn
-  libreoffice-langpack-nr
-  libreoffice-langpack-nso
-  libreoffice-langpack-pl
-  libreoffice-langpack-pt
-  libreoffice-langpack-pt_BR
-  libreoffice-langpack-ro
-  libreoffice-langpack-ru
-  libreoffice-langpack-sk
-  libreoffice-langpack-sl
-  libreoffice-langpack-sr
-  libreoffice-langpack-ss
-  libreoffice-langpack-sv
-  libreoffice-langpack-tn
-  libreoffice-langpack-tr
-  libreoffice-langpack-ts
-  libreoffice-langpack-uk
-  libreoffice-langpack-xh
-  libreoffice-langpack-zu
-  task-lxde
-
-
-# Gestion des peers souci de module parfois
-
-./bin/urpm peer list
-Error: module 'urpm.cli.colors' has no attribute 'warn'
-
-# Souci à l'upgrade a corriger
-
-Pour les upgrades quand y'a des orphans à enlever faut quand même attendre la mise à jour de la rpmdb sinon ça fait.
-=> petit souci de cohérence => faut mettre les erase en queue.
-
-Et l'affichage des erreurs en JSON c'est moche (P'tet a prevoir en mode batch mais pas en mode live)
-
-# Dépendances
-
-./bin/urpm depends phpmyadmin
-Pourquoi y'a rien ?
-
-Je subodore que c'est parce qu'il ne liste que des requires qui ne sont pas des paquets mais des provides et que c'est pas géré.
-
-=> Sans doute lié directement ou indirectement au souci de résolution de dépendances.
-=> Il faudra trouver une idée pour afficher les alternatives intelligemment (couleurs ?) et les "blocs de dépendances croisées" sans boucler comme des idiots.
-
-# Alternatives et --prefer
-
-## État actuel (2025-12-23)
-L'option --prefer est fonctionnelle avec :
+### Alternatives et --prefer - FONCTIONNEL
+L'option `--prefer` fonctionne avec :
 - Contraintes de version : `--prefer=php:8.4`
 - Préférences positives : `--prefer=apache,php-fpm`
 - Préférences négatives : `--prefer=-apache-mod_php`
-- Combinaisons : `--prefer=php:8.4,apache,php-fpm,-apache-mod_php`
 
-La sélection se fait maintenant sur les REQUIRES/PROVIDES, pas les noms de paquets.
+La sélection se fait sur les REQUIRES/PROVIDES, pas les noms de paquets.
+Commits : 544d3a9, 454586a, 3416669
 
-## Améliorations à prévoir
+### README - CORRIGÉ
+Documentation mise à jour pour :
+- Gestion des peers et blacklist
+- Commandes server
+- ip_mode IPv4/IPv6
+
+---
+
+## En cours / À faire
+
+### Performance de why
+La commande `why` utilise `_get_rdeps()` qui itère sur tous les paquets installés pour chaque niveau du BFS.
+Contrairement à `rdepends --hide-uninstalled` qui pré-construit le graphe en une passe, `why` fait des lookups répétés.
+
+**TODO** : utiliser `_build_rdeps_graph()` pour `why` aussi.
+
+### Souci à l'upgrade
+Pour les upgrades quand y'a des orphans à enlever, faut quand même attendre la mise à jour de la rpmdb.
+=> petit souci de cohérence => faut mettre les erase en queue.
+
+Et l'affichage des erreurs en JSON c'est moche (prévoir mode batch).
+
+### Dépendances phpmyadmin
+`./bin/urpm depends phpmyadmin` n'affiche rien.
+
+Cause probable : ne liste que des requires qui ne sont pas des paquets mais des provides virtuels.
+=> Il faudra afficher les alternatives intelligemment (couleurs ?) et les "blocs de dépendances croisées".
+
+### Pre-downloading
+Pas encore vu passer un seul predownload... à vérifier que ça marche.
+
+Idées complémentaires à discuter :
+- S'il y a plusieurs peers => élection d'un master qui répartit les tâches de prédownloads ?
+- Faire en sorte qu'un paquet prédownloadé soit sur au moins deux peers au cas où un soit éteint ?
+- Détecter quand un peer passe offline et récupérer upstream les prédownloads qui étaient chez lui ?
+
+Objectifs :
+1. Ne pas faire 50 prédownloads de chaque fichier s'il y a 50 peers
+2. Si un peer est éteint, ne pas avoir à tous télécharger le complément sur le miroir upstream
+
+### Fix dep (bootstrap)
+Quand python3-solv ou python3-zstandard ne sont pas installés, proposer de les installer :
+- soit en DL direct
+- soit via urpmi
+
+Et bien les mettre dans installed-through-deps.list.
+
+### Souci d'alignement dans urpm h
+La colonne Action n'est pas assez large et les titres sont mal alignés.
+
+### Gestion du cache - Quotas
+Le nettoyage basique (fichiers > 30 jours) n'est pas forcément adapté.
+
+**TODO** : implémenter les quotas par media et global.
+Si on arrive à la taille max du quota, le scheduler nettoie les fichiers en commençant par les plus vieux et surtout s'ils ont été installés.
+
+### Aliases manquants
+- `urpm requires` = `urpm depends`
+- `urpm whatrequires` = `urpm rdepends`
+
+### Contraintes de version dans whatprovides
+Pouvoir préciser les contraintes de version (== < <= > >=) pour filtrer.
+
+---
+
+## Notes externes (pas des bugs urpm)
+
+### Packaging php-webinterface (à remonter aux packageurs Mageia)
+
+Problème : `php-webinterface` n'est fourni que par des paquets spécifiques à un webserver :
+- `php8.4-fpm-nginx` (requiert nginx)
+- `php8.4-fpm-apache` (requiert apache)
+- `apache-mod_php8.4` (requiert apache)
+- `php8.4-cgi` (compatible avec tous mais pas fpm)
+
+Conséquence : on ne peut pas avoir `lighttpd + php-fpm` car il n'existe pas de paquet `php8.4-fpm-lighttpd` ou `php8.4-fpm-generic`.
+
+Solutions possibles côté packaging :
+1. `php8.4-fpm` fournit directement `php-webinterface` (config FastCGI générique)
+2. Créer un paquet `php8.4-fpm-fcgi` ou `php8.4-fpm-generic` qui fournit `php-webinterface` sans dépendre d'un webserver spécifique
+3. Les paquets `-nginx` et `-apache` deviennent juste des configs spécifiques optionnelles
+
+Note : ce n'est PAS un problème de l'algo de résolution d'urpm.
+
+---
+
+## Améliorations futures --prefer
 
 ### Ordre des choix
 - Quand on choisit au 2ème choix (après la version de PHP) entre cli, cgi et fpm,
@@ -141,115 +135,4 @@ La sélection se fait maintenant sur les REQUIRES/PROVIDES, pas les noms de paqu
 Les flags DEBUG_RESOLVER (resolver.py) et DEBUG_PREFERENCES (main.py)
 permettent d'activer les traces de debug.
 
-## Historique
 Voir le fichier de discussion avec Grok pour servir d'inspiration : libsolv_grok.txt
-
-# Pre-downloading
-
-=> Pas encore vu passer un seul predownload... on est surs que ça marche ça ?
-
-Et idées complémentaires à discuter : 
-  - s'il y a plusieurs peers => election d'un master qui va répartit les tâches de prédownloads ?
-  - il faudrait p'tet aussi faire en sorte qu'un paquet prédownloadé soit sur au moins deux peers au cas où un soit éteint ? Ou alors détecter quand un peer pass offline et récupérer upstream les prédownloads qui étaient chez lui ? 
-
-En fait je suis pas tout à fait sur de quoi et comment, d'où le besoin de discussion, mais l'idée c'est:
-  - 1 de ne pas faire 50 prédownloads de chaque fichier s'il y a 50 peers
-  - si un peer est éteint de ne pas se retrouver à tous les 50 peers devoir télécharger le complément sur le miroir upstream...
-
-# ... and xxx more
-
-Dans urpm i mais aussi urpm h -d, urpm depends et à plein d'autres endroits  on a des listres traonquées.
-
-Il faut pouvoir afficher les listes complètes si on veut.
-
-Et je verrais bien afficher sur plusieurs colonnes... en fonction de la longueur du plus long nom de paquet et de la largeur du terminal pour que ça fasse pas moche.
-
-# Fix dep
-
-Quand python3-solv ou python3-zstandard ne sont pas installés il faudra un mécanisme dégradé pour proposer de les installer soit en DL direct soit via urpmi
-
-python3-solv manque : voullez vous l'installer
-1- directement
-2 via urpmi
-[1(default)-2] o/n
-
-(Et il faut bien penser à les mettre dans le installed-through-deps.list)
-
-# Souci d'alignement dans urpm h
-
-./bin/urpm h
-
-ID | Date | Action | Status | Packages           <-- ça c'est moche
-----------------------------------------------------------------------
-  19 | 2025-12-20 | install  | complete    | colorprompt,git-prompt
-  18 | 2025-12-20 | install  | complete    | git,qgit (+4 deps)
-  17 | 2025-12-20 | autoremove | complete    |                                   <-- ça c'est moche 
-  16 | 2025-12-20 | upgrade  | complete    | fuse-common,fuse3,gpsd,gvfs... (+26 deps)
-  15 | 2025-12-18 | upgrade  | complete    | lib64decor0,libdecor
-  14 | 2025-12-18 | install  | complete    | task-plasma (+380 deps)
-  13 | 2025-12-18 | install  | complete    | freecad (+290 deps)
-  12 | 2025-12-18 | erase    | complete    | task-plasma (+440 deps)
-  11 | 2025-12-18 | install  | complete    | task-plasma (+440 deps)
-  10 | 2025-12-18 | erase    | complete    | task-plasma (+440 deps)
-   9 | 2025-12-18 | install  | complete    | task-plasma (+440 deps)
-   8 | 2025-12-18 | install  | complete    | task-plasma (+440 deps)
-   7 | 2025-12-18 | erase    | complete    | task-plasma (+440 deps)
-   6 | 2025-12-18 | upgrade  | complete    | cpupower,kernel-desktop-6.1... (+5 deps)
-   5 | 2025-12-18 | install  | complete    | task-plasma (+440 deps)
-   4 | 2025-12-18 | erase    | complete    | task-plasma (+440 deps)
-   3 | 2025-12-18 | install  | complete    | task-plasma (+440 deps)
-   2 | 2025-12-18 | erase    | complete    | task-plasma (+440 deps)
-   1 | 2025-12-18 | install  | complete    | task-plasma (+461 deps)
-
-La colonne Action est pas assez large et les titres c'est n'importe quoi.
-
-# Gestion du cache
-
-  - [x] Nettoyage cache basique (fichiers > 30 jours)
-
-=> ça c'est une connerie que j'ai jamais demandé y'a plein de gens qui ne font pas les updates tous les mois
-
-il faut qu'on implémente les quotas par media et global.
-Si on arrive à la taille max du quota le scheduler nettoie les fichiers en commençant par les plus vieux et surtout s'ils ont été installés.
-
-# Aliases
-
-- faire des aliases : 
-  - urpm requires = urpm depends 
-  - urpm whatrequires = urpm rdepends
-
-- ajouter :
-  - urpm suggests
-  - urpm whatsuggests
-  - urpm recommends
-  - urpm whatrecommends
-
-# More / contraines de version
-
-Pouvoir sur un whatprovides de préciser les contraintes de version (== < <= > <= ) pour filtrer
-
-
-# Packaging php-webinterface (à remonter aux packageurs Mageia)
-
-Problème : `php-webinterface` n'est fourni que par des paquets spécifiques à un webserver :
-- `php8.4-fpm-nginx` (requiert nginx)
-- `php8.4-fpm-apache` (requiert apache)
-- `apache-mod_php8.4` (requiert apache)
-- `php8.4-cgi` (compatible avec tous mais pas fpm)
-
-Conséquence : on ne peut pas avoir `lighttpd + php-fpm` car il n'existe pas de paquet `php8.4-fpm-lighttpd` ou `php8.4-fpm-generic`.
-
-Solutions possibles côté packaging :
-1. `php8.4-fpm` fournit directement `php-webinterface` (config FastCGI générique)
-2. Créer un paquet `php8.4-fpm-fcgi` ou `php8.4-fpm-generic` qui fournit `php-webinterface` sans dépendre d'un webserver spécifique
-3. Les paquets `-nginx` et `-apache` deviennent juste des configs spécifiques optionnelles
-
-Note : ce n'est PAS un problème de l'algo de résolution d'urpm. L'algo ne doit pas "tricher" en ignorant des dépendances requises.
-
-# README
-
-Mettre à jour le README pour les nouvelles fonctionnalités (gestion des peers & blacklist de peers)
-
-Corriger le README pour les blacklists de paquets => normalement ce ssont des paquets qu'on ne déinstalle pas (et vérifier que le code suit bien cette règle)
-
-
