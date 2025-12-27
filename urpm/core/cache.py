@@ -112,6 +112,48 @@ class CacheManager:
         stats = self.db.get_cache_stats()
         return stats.get('total_size', 0)
 
+    def get_disk_usage(self, media_id: int = None) -> Dict[str, int]:
+        """Get actual disk usage by scanning the filesystem.
+
+        This is more accurate than database stats when files are manually
+        deleted or the database is out of sync.
+
+        Args:
+            media_id: Filter by media (None = all media)
+
+        Returns:
+            Dict with 'total_size' (bytes) and 'file_count'
+        """
+        from .config import get_media_local_path
+
+        total_size = 0
+        file_count = 0
+
+        if media_id:
+            media = self.db.get_media_by_id(media_id)
+            if media:
+                media_path = get_media_local_path(media, self.base_dir)
+                if media_path.exists():
+                    for rpm_file in media_path.glob('*.rpm'):
+                        try:
+                            total_size += rpm_file.stat().st_size
+                            file_count += 1
+                        except OSError:
+                            pass
+        else:
+            # Scan all media directories
+            for media in self.db.list_media():
+                media_path = get_media_local_path(media, self.base_dir)
+                if media_path.exists():
+                    for rpm_file in media_path.glob('*.rpm'):
+                        try:
+                            total_size += rpm_file.stat().st_size
+                            file_count += 1
+                        except OSError:
+                            pass
+
+        return {'total_size': total_size, 'file_count': file_count}
+
     # =========================================================================
     # Quota enforcement
     # =========================================================================

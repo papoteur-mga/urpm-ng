@@ -136,6 +136,17 @@ class Scheduler:
         # Initial delay to let the daemon fully initialize
         time.sleep(10)
 
+        # Reconcile cache on startup (handles files deleted while daemon was stopped)
+        try:
+            from ..core.cache import CacheManager
+            cache_mgr = CacheManager(self.db, self.base_dir)
+            logger.info("Startup cache reconcile starting...")
+            reconcile_result = cache_mgr.reconcile()
+            logger.info(f"Startup cache reconcile done: removed {reconcile_result['orphan_records_removed']} orphan records, "
+                       f"added {reconcile_result['untracked_files_added']} untracked files")
+        except Exception as e:
+            logger.warning(f"Startup cache reconcile failed: {e}", exc_info=True)
+
         try:
             while self._running:
                 try:
@@ -527,6 +538,14 @@ class Scheduler:
             from ..core.cache import CacheManager
 
             cache_mgr = CacheManager(self.db, self.base_dir)
+
+            # First reconcile DB with filesystem (handles manual deletions)
+            reconcile_result = cache_mgr.reconcile()
+            if reconcile_result['orphan_records_removed'] > 0:
+                logger.info(f"Cache reconcile: removed {reconcile_result['orphan_records_removed']} orphan DB records")
+            if reconcile_result['untracked_files_added'] > 0:
+                logger.info(f"Cache reconcile: registered {reconcile_result['untracked_files_added']} untracked files")
+
             result = cache_mgr.enforce_quotas(dry_run=False)
 
             if result['total_deleted'] > 0:
@@ -695,6 +714,10 @@ class Scheduler:
                 return
             logger.debug(f"Media {media_name}: {len(all_packages)} packages in seed set")
 
+        # Keep only the latest version of each package name (like --latest-only)
+        from ..core.rpm import filter_latest_versions
+        all_packages = filter_latest_versions(all_packages)
+
         # Only replicate packages with known server dates
         # Others will be picked up once HEAD job fetches their dates
         packages_with_dates = [p for p in all_packages if p.get('server_last_modified')]
@@ -734,8 +757,11 @@ class Scheduler:
         quota_mb = media.get('quota_mb')
         available_bytes = None
         if quota_mb:
-            stats = self.db.get_cache_stats(media_id=media_id)
-            current_bytes = stats.get('total_size', 0) or 0
+            # Use actual disk usage (more reliable than DB stats)
+            from ..core.cache import CacheManager
+            cache_mgr = CacheManager(self.db, self.base_dir)
+            disk_stats = cache_mgr.get_disk_usage(media_id=media_id)
+            current_bytes = disk_stats.get('total_size', 0)
             quota_bytes = quota_mb * 1024 * 1024
             available_bytes = quota_bytes - current_bytes
 

@@ -3397,21 +3397,8 @@ def cmd_proxy_sync(args, db: PackageDatabase) -> int:
     seed_names = result['packages']
     print(f"With dependencies: {colors.count(len(seed_names))} packages")
 
-    # Helper to compare RPM versions (simplified rpmvercmp)
-    def evr_key(pkg):
-        """Return a sortable key for epoch-version-release comparison."""
-        import re
-        epoch = pkg.get('epoch', 0) or 0
-
-        def split_version(v):
-            """Split version into comparable parts (numeric vs alpha).
-            Returns tuples (type, value) where type=0 for int, 1 for str.
-            This ensures consistent ordering: numbers < strings."""
-            parts = re.findall(r'(\d+|[a-zA-Z]+)', v or '0')
-            return [(0, int(p)) if p.isdigit() else (1, p) for p in parts]
-
-        return (epoch, split_version(pkg.get('version', '0')),
-                split_version(pkg.get('release', '0')))
+    # Import RPM version comparison utilities
+    from .core.rpm import evr_key
 
     # Collect packages to mirror
     # For each media, keep only the latest version of each package name

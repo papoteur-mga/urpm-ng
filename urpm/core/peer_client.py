@@ -31,6 +31,10 @@ class Peer:
     host: str
     port: int
     media: List[str] = field(default_factory=list)
+    proxy_enabled: bool = False
+    local_version: str = ''
+    local_arch: str = ''
+    served_media: List[dict] = field(default_factory=list)
 
     @property
     def base_url(self) -> str:
