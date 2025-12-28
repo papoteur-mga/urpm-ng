@@ -1,487 +1,170 @@
 # urpm-ng TODO
 
-## Prérequis
+> Voir [doc/ROADMAP.md](doc/ROADMAP.md) pour la vision et les priorités.
+> Voir [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) pour les décisions techniques.
+> Voir [CHANGELOG.md](CHANGELOG.md) pour l'historique des fonctionnalités.
 
-Pour utiliser urpm, les paquets suivants doivent être installés :
+---
 
+## En cours
+
+### Alternatives (OR deps)
+- [ ] Tests intensifs install avec alternatives
+- [ ] Valider mode --auto
+- [ ] Valider re-résolution après choix utilisateur
+
+
+### Bootstrap
+- [ ] Quand python3-solv ou python3-zstandard manquent, proposer installation via DL direct ou urpmi
+
+---
+
+## Phase 1 : Developper & community features
+
+### needs-restarting
+- [ ] Détecter reboot nécessaire (kernel, glibc, systemd)
+- [ ] Lister services à redémarrer
+
+### automatic config
+- [ ] Configuration auto-install dans urpmd
+- [ ] Fichier `/etc/urpm/automatic.conf`
+
+### Documentation EN/FR
+- [ ] Pages man
+- [ ] Guide migration urpmi → urpm
+
+### --downloadonly / download
+- [ ] Option `--downloadonly` sur install/upgrade
+- [ ] Commande `urpm download <pkg>`
+
+### builddep
+- [ ] Parser BuildRequires du SRPM/.spec
+- [ ] `urpm builddep <pkg.spec>`
+
+### Parsing hdlist.cz
+- [ ] Liste des fichiers contenus
+- [ ] Description longue, changelog, scripts
+
+### Recherche fichiers (urpmf)
+- [ ] Chercher dans paquets disponibles (pas seulement installés)
+- [ ] Support patterns/regex
+
+---
+
+## Phase 2 : tricky/huge features
+
+### Internationalisation EN/FR
+- [ ] gettext
+- [ ] Fichiers .po/.mo (fr, en)
+- [ ] Traduction de la documentation (man pages & guides)
+
+### system-upgrade
+- [ ] Updates préliminaires
+- [ ] Phase download
+- [ ] Phase apply (reboot ou online) en une fois ou deux fois
+- [ ] Gestion conflits version majeure
+
+---
+
+## Phase 3 : GUI & applet
+
+### mgaonline-ng
+- [ ] Applet systray
+- [ ] Notification updates
+- [ ] Suivi visuel
+
+### groups (source rpmsrate)
+- [ ] `urpm group list/info/install/remove`
+- [ ] Cohérence avec `urpm seed`
+
+### rpmdrake-ng
+- [ ] IHM complète
+- [ ] Recherche multicritères
+- [ ] Gestion médias/peers/config
+
+---
+
+## Phase 4 : Consolidation & stabilisation
+
+### fonctions diverses
+- [ ] offline-upgrade
+- [ ] distro-sync
+- [ ] swap (remove+install combiné)
+- [ ] check intégrité BDD
+- [ ] debuginfo-install
+
+
+### Compatibilité legacy
+- [ ] Wrappers urpmi/urpme/urpmq/urpmf avec mapping options
+
+---
+
+## Améliorations continues & debug
+
+### Internationalisation
+- [ ] gettext
+- [ ] Fichiers .po/.mo (de, es, it, pt_BR, ru)
+- [ ] Pages man (de, es, it, pt_BR, ru)
+- [ ] Guide migration urpmi → urpm (de, es, it, pt_BR, ru)
+
+### Quotas et cache
+- [ ] Implémenter CacheManager avec quotas par média et global
+- [ ] Éviction intelligente (non-référencés d'abord, puis score obsolescence)
+
+### Idle detection
+- [ ] Fix: reset `_last_net_sample` après batch de downloads (évite pause sur propre trafic)
+
+### Refonte why/rdepends
+
+Mutualiser le code et améliorer les deux commandes.
+
+**Problème actuel :**
+- `why` et `rdepends` ont du code dupliqué
+- Performance médiocre (parcours répétés)
+- Gestion des "cassures" de chaîne complexe
+
+**Cassure = chaîne incomplète**
+
+Exemple : logiciel X requiert "son" (pulseaudio OU pipewire)
 ```
-dnf install python3-libsolv python3-zstandard
-# ou
-urpmi python3-solv python3-zstandard
+X (explicite) → son → pulseaudio (installé) ✓ chaîne OK
+                    → pipewire (PAS installé) ✗ cassure
+                          └── pipewire-libs (installé)
+
+Y (explicite) → pipewire-libs ✓ chaîne OK directe
 ```
 
-- **python3-solv** : résolution des dépendances (obligatoire)
-- **python3-zstandard** : décompression des fichiers synthesis.hdlist.cz (obligatoire)
-
-Note : Ne pas utiliser python3-zstd (paquet Mageia) qui a des bugs de décompression.
-
-
-## Tests
-
-Voir [TESTS_TODO.md](TESTS_TODO.md) pour les tests manuels et l'infrastructure de tests automatisés a venir.
-
-
-## Installation par lots (P2) - FAIT
-
-L'installation par lots (batched install) améliore l'UX en découpant
-les grosses installations en lots de 50 paquets, permettant un feedback plus
-fréquent lors de la mise à jour de la base RPM.
-
-### Implémentation
-
-- `Installer._find_sccs()` : algorithme de Tarjan pour détecter les cycles
-- `Installer._build_dependency_graph()` : construit le graphe requires/provides
-  - Mappe TOUS les provides (y compris virtuels) vers le paquet fournisseur
-- `Installer.install_batched()` : découpe en lots respectant les SCCs
-
-### Bug corrigé
-
-Le code original faisait `sccs.reverse()` pensant mettre les dépendances en premier,
-mais Tarjan retourne DÉJÀ les dépendances en premier (feuilles avant racines).
-Le reverse inversait l'ordre et causait des erreurs de dépendances RPM.
-
-
-## Alternatives (OR deps) (P1) - EN COURS
-
-Quand plusieurs paquets peuvent satisfaire une même dépendance (ex: task-sound
-fourni par task-pulseaudio OU task-pipewire), demander à l'utilisateur.
-
-### Implémenté
-
-- `Alternative` dataclass dans resolver.py
-- `Resolution.alternatives` pour retourner les choix
-- `resolve_install(choices={})` accepte les choix utilisateur
-- CLI demande interactivement (ou prend le premier en mode --auto)
-
-### À tester
-
-- [ ] Install avec alternatives (ex: task-plasma qui tire task-sound)
-- [ ] Mode --auto prend le premier choix automatiquement
-- [ ] Re-résolution après choix utilisateur
-
-
-## Options manquantes (P1) - FAIT
-
-### --force - FAIT
-
-Forcer l'installation/suppression malgré les conflits ou dépendances cassées.
-
-Implémenté :
-- [x] `urpm install --force` - ignore problèmes deps et conflits
-- [x] `urpm erase --force` - ignore problèmes deps
-- [x] `urpm upgrade --force` - idem install
-
-### --reinstall - FAIT
-
-Réinstaller un paquet déjà installé (même version).
-Utile pour réparer des fichiers corrompus.
-
-Implémenté :
-- [x] `urpm install --reinstall <pkg>`
-
-
-## Sécurité - Clés GPG (P1) - FAIT
-
-Implémenté :
-  - [x] Vérification des signatures activée par défaut
-  - [x] Refus si signature invalide avec message clair
-  - [x] Option `--nosignature` pour bypass (install/update/upgrade)
-  - [x] `urpm key list` - lister les clés installées
-  - [x] `urpm key import <file|url>` - importer une clé (fichier local ou HTTPS)
-  - [x] `urpm key remove <keyid>` - supprimer une clé
-
-
-## autoremove (P1)
-
-### Architecture unifiée
-
-Commande unique pour tout le nettoyage système avec sélecteurs :
-
-```
-urpm autoremove                      # équivaut à --orphans (compat apt/dnf)
-urpm autoremove --orphans            # paquets orphelins
-urpm autoremove --kernels            # anciens kernels
-urpm autoremove --faildeps           # deps de transactions interrompues
-urpm autoremove --all                # tout d'un coup
-urpm autoremove --orphans --kernels  # combinable
-```
-
-Alias : `cleandeps` → `autoremove --faildeps` (rétrocompat)
-
-### Sélecteur --orphans
-
-Détection des orphelins :
-  - Utilise /var/lib/rpm/installed-through-deps.list (compatible urpmi)
-  - Mise à jour du fichier lors de chaque opération install/erase/upgrade
-  - Un orphelin = paquet installé comme dépendance + plus requis par personne
-
-### Sélecteur --kernels
-
-Comportement :
-  - Garder le kernel en cours d'exécution (obligatoire, liste noire)
-  - Garder les N versions les plus récentes (configurable, défaut: 2)
-  - Proposer la suppression des anciens kernels
-  - Supprimer aussi les modules associés (kernel-*-devel, kernel-*-modules-*, etc.)
-
-Configuration :
-  - `urpm config kernel-keep N` - nombre de kernels à conserver (en plus de l'actif)
-
-### Sélecteur --faildeps
-
-Nettoie les dépendances orphelines laissées par des transactions interrompues.
-Remplace la commande `cleandeps` (qui devient un alias).
-
-### Architecture à deux niveaux de protection
-
-**Liste noire (blocage)** - Suppression = machine morte :
-  - glibc, basesystem, filesystem, systemd, coreutils, rpm, bash
-  - grub2 (bootloader)
-  - Le kernel EN COURS D'EXÉCUTION (détection : `uname -r`)
-  - Support filesystem du root (détection : `findmnt -n -o FSTYPE /`)
-
-Comportement : refuser la suppression avec message explicatif.
-
-**Liste rouge (avertissement)** - Demander confirmation :
-  - acl, attr, parted, gdisk, cryptsetup, lvm2
-  - fuse, fuse3, udisks2, xfsprogs, e2fsprogs, btrfs-progs
-  - wireless-tools, networkmanager, wpa_supplicant
-  - Outils système : msec, msec-gui, drakxtools, drakguard
-  - Drivers X11 : x11-driver-input, x11-driver-video et variantes
-  - Impression : cups, system-config-printer, hplip
-  - Desktop portals : xdg-desktop-portal-*
-  - Polices de base : fonts-ttf-dejavu, fonts-ttf-liberation
-
-Comportement : "Package X est généralement utile. Supprimer quand même ? [y/N]"
-
-**TODO: Revoir le contenu des listes**
-Les listes actuelles sont un premier jet. À affiner avec la communauté Mageia :
-  - Vérifier que tous les paquets critiques sont dans la blacklist
-  - Vérifier les noms exacts des paquets Mageia (ex: NetworkManager vs networkmanager)
-  - Compléter la redlist avec les paquets couramment utiles
-  - Tester sur une vraie Mageia pour valider
-
-**TODO: Permettre de modifier la blacklist built-in**
-Cas d'usage : installation avancée où l'utilisateur sélectionne manuellement les paquets.
-La liste "critique" peut différer du défaut (ex: pas de grub si autre bootloader).
-Prévoir une option pour désactiver/remplacer des entrées built-in :
-  - `urpm config blacklist override <pkg>` - ignorer une entrée built-in
-  - Ou fichier /etc/urpm/autoremove.conf avec section [blacklist-override]
-  - Avec avertissement très explicite sur les risques
-
-### Gestion des listes de protection
-
-Fichier de configuration : /etc/urpm/autoremove.conf (ou dans la BDD)
-
-Commandes de gestion :
-  - `urpm config blacklist list` - afficher la liste noire
-  - `urpm config blacklist add <pkg>` - ajouter à la liste noire
-  - `urpm config blacklist remove <pkg>` - retirer de la liste noire
-  - `urpm config redlist list/add/remove` - idem pour liste rouge
-
-### Extension future
-
-  - `urpm autoremove --cache` - nettoyage du cache RPM (P2)
-
-
-## Affichage couleur (P2)
-
-### Palette de couleurs
-  - Rouge = erreurs et alertes
-  - Orange = warnings
-  - Vert = ok/réussite
-  - Bleu = information contextuelle
-
-### Options
-  - Détection automatique si terminal supporte les couleurs
-  - `--nocolor` : désactiver les couleurs
-  - `--batch` : mode script, format de sortie parsable (À SPÉCIFIER)
-
-### Mode batch (à spécifier)
-Le mode --batch doit produire une sortie exploitable par des scripts.
-Travail de spécification à faire :
-  - Définir le format de sortie (JSON ? TSV ? autre ?)
-  - Quelles commandes supportent --batch
-  - Quelles informations sont exposées
-  - Codes de retour standardisés
-
-
-## Service urpmd et réseau P2P (P2)
-
-### Vision globale
-
-Chaque machine Mageia avec urpmd peut servir de miroir pour ses voisines.
-Objectif : réduire drastiquement la bande passante vers les miroirs distants
-en favorisant le téléchargement local (LAN >> WAN).
-
-### Phase 1 : urpmd miroir local (MVP)
-
-**Scheduler (FAIT) :**
-  - [x] Mise à jour intelligente des métadonnées (HTTP HEAD)
-  - [x] Pré-téléchargement des paquets quand système idle
-  - [x] Nettoyage cache basique (fichiers > 30 jours)
-  - [x] Détection idle CPU/réseau
-  - [x] Jitter anti-thundering herd
-
-**Serveur HTTP - Endpoints API (FAIT) :**
-  - [x] `/ping` : health check
-  - [x] `/status` : état du daemon
-  - [x] `/updates` : liste des mises à jour disponibles
-  - [x] `/available?pkg=xxx` : vérifier disponibilité d'un paquet
-  - [x] `/refresh` (POST) : forcer rafraîchissement metadata
-
-**Serveur HTTP - Servir les fichiers (FAIT) :**
-  - [x] `/media/` : navigation des répertoires (liste JSON ou HTML)
-  - [x] `/media/<hostname>/<media_name>/` : répertoire d'un média
-  - [x] `/media/<hostname>/<media_name>/*.rpm` : téléchargement RPM
-  - [x] `/media/<hostname>/<media_name>/media_info/` : synthesis, hdlist, MD5SUM
-  - [ ] Support HTTP Range pour reprise de téléchargement (P3)
-
-**Configuration miroir :**
-  - Mode "complet" : tout garder (machine dédiée miroir)
-  - Mode "partiel" : garder ce qui a été téléchargé (défaut)
-  - Option taille max du cache
-
-### Phase 2 : Découverte des peers (FAIT)
-
-**Découverte automatique (implémenté) :**
-  - [x] Broadcast UDP sur le LAN (port 9878) pour trouver les urpmd voisins
-  - [x] Maintien d'une liste de peers actifs avec leur état
-  - [x] Timeout pour détecter peers down (180s prod, 45s dev)
-  - [x] Jitter sur les broadcasts pour éviter synchronisation (thundering herd)
-
-**Endpoints peer discovery (implémenté) :**
-  - [x] `GET /api/peers` : liste des peers connus et leur état
-  - [x] `POST /api/announce` : un peer s'annonce
-
-**Sécurité peers (FAIT) :**
-  - [x] Blacklist automatique si un peer fournit des paquets mal signés/non signés
-  - [x] Log d'alerte sécurité si paquet invalide reçu d'un peer
-  - [x] Persistence de la blacklist entre redémarrages (SQLite)
-  - [x] Commande pour gérer la blacklist (`urpm peer blacklist/unblacklist <host>`)
-  - [x] Filtrage des peers blacklistés avant téléchargement
-  - Note : pas de signature des broadcasts (n'importe qui peut s'annoncer) - sécurité
-    assurée par vérification GPG au téléchargement, pas à la découverte
-
-### Phase 3 : Téléchargement P2P (FAIT)
-
-**Pré-téléchargement intelligent (implémenté) :**
-  - [x] Avant de télécharger depuis miroir distant, vérifier si un peer l'a
-  - [x] Load-balancing sur les peers disponibles
-  - [x] Fallback sur miroir distant si aucun peer n'a le paquet
-  - [x] Reassignment dynamique si un peer échoue
-
-**Priorité de téléchargement (implémentée) :**
-  1. Cache local (déjà téléchargé)
-  2. Peers LAN (urpmd voisins)
-  3. Miroirs distants
-
-### Phase 4 : urpm standalone P2P (FAIT)
-
-**urpm sans urpmd (implémenté) :**
-  - [x] PeerClient intégré directement dans urpm
-  - [x] Découverte des peers via broadcast UDP
-  - [x] `urpm install/upgrade` utilise les peers disponibles automatiquement
-
-### Phase 5 : 
-
-**architecture** 
-  - [ ] implémenter le web service /api/upgrade dans urpmd + auth ?
-  - [ ] décider si on utilise urpmd ou pas pour mgaonline-ng  et rpmdrake-ng. Si oui rupmd doit tourner. Si non il faut s'arranger pour ne pas dupliquer le code pour qu'il soit utilisé aussi bien par urpm que mgaonline-ng et rpmdrake-ng
-
-**remplacement de mgaonline par mgaonline-ng**
-  - [ ] développer une applet (icode dans la barre des tâches + ihm)
-    - [ ] avertir des updates
-    - [ ] lister/choisir les updates en gérant les dépendances
-    - [ ] procéder à l'update avaec suivi de l'avancemment visuel (se caler sur mgaonline)
-
-**remplacement de rpmdrake par rpmdrake-ng**
-  - [ ] développer l'application sur la même base
-    - [ ] IHM de base
-    - [ ] recherche et selection de paquets (multicritères)
-    - [ ] installer/mettre à jour/enlever les paquets
-    - [ ] gestion des médias
-    - [ ] gestion des redlists / blacklists
-    - [ ] affichage et gestion des peers
-    - [ ] configuration -> kernels, quotas, fonctions urpmd (activation, types d'auth)...
-
-### Phase 6 : Installeur Mageia
-
-Attentiion que l'installeur est en perl et que tout recoder en python serait une gageure.
-
-**Support P2P dans l'installeur :**
-  - Détection des urpmd sur le LAN pendant l'installation
-  - Téléchargement des paquets depuis les voisines Mageia
-  - Accélération drastique des installations en environnement multi-machines
-
-**Support du boot PXE :**
-  - [ ] choix : Implementation du boot PXE directement par urpmd ou utilisation d'un paquet existant
-  - [ ] utilisation automatique des peers pour l'installation.
-
-### Phase 7 : Mode Proxy/Relais avancé (P3)
-
-Cas d'usage : machine connectée à internet (ex: connexion mobile) + LAN avec
-machines sans accès internet. La machine connectée peut servir de relais.
-
-Prévoir aussi le proxying cross versions : une machine en mageia 9 sert de proxy aussi pour mageia 10.
-Ce qui veut dire que certains medias peuvent être sychronisés par urpmd MAIS pas utilisés par urpm.
-
-**Fonctionnement désactivé par défaut** - opt-in via configuration.
-
-**Endpoints proxy :**
-  - `GET /api/hasupstream` : le peer peut-il atteindre les miroirs upstream ?
-    Réponse : `{"available": true, "mirrors": ["mirror1.mageia.org", ...]}`
-  - `POST /api/request` : demander à un peer de récupérer des paquets
-    Requête : `{"packages": ["foo-1.0.rpm", ...], "callback": "http://requester:port/api/done"}`
-    Réponse : `{"accepted": true, "request_id": "uuid", "queue_position": 3}`
-  - `POST /api/done` (sur le demandeur) : notification de complétion
-    Requête : `{"request_id": "uuid", "ready": ["foo-1.0.rpm"], "failed": []}`
-
-**Côté client (urpm install) :**
-  - Si miroirs upstream injoignables → chercher peers avec `/api/hasupstream`
-  - Si trouvé → `/api/request` puis attendre callback (ou polling `/api/have`)
-  - Fallback : afficher erreur si aucun peer proxy disponible
-
-**Sécurité :**
-  - Rate limiting par peer (configurable)
-  - Taille max de requête
-  - Whitelist optionnelle des peers autorisés à demander
-  - File d'attente avec limite
-
-**Configuration :**
-  - `urpm config proxy-mode enable/disable` : activer le mode relais
-  - `urpm config proxy-ratelimit N` : max requêtes par minute par peer
-  - `urpm config proxy-maxqueue N` : taille max de la file d'attente
-  - `urpm config proxy-whitelist add/remove/list` : peers autorisés (vide = tous)
-
-
-### Phase 8 : Management de parc
-
-** Inventaire et gestion de parc **
-  - [ ] Detection des peers
-  - [ ] Authentification croisée manager/urpmd(s) => A voir comment... pki ?
-  - [ ] Récolte de configurations
-  - [ ] Inventaire (versions, état de mise à jour)
-  - [ ] déclenchement d'updates plus ou moins durement imposés (pop up dans mgaonline) selon des règles (à déterminer)
-  - [ ] goupes de machines
-  - [ ] installations/désinstallations/upgrades déclenchés sur des machines ou des groupes
-  - [ ] activation/désactivation/ajout/suppression de medias
-
-### Endpoints futurs (désactivés par défaut)
-
-  - `/auth` : authentification (à spécifier)
-  - `/run/<task>` : déclencher tâche scheduler
-  - `/upgrade`, `/install`, `/erase` : pilotage à distance
-  → Permettra administration centralisée d'un parc
-
-
-## Dépendances faibles : Recommends / Suggests (P2) - FAIT
-
-Implémenté :
-  - [x] Tables BDD : `recommends`, `suggests`, `supplements`, `enhances` (schema v6)
-  - [x] Stockage dans import_packages()
-  - [x] Parsing synthesis : supplements et enhances
-  - [x] Resolver : InstallReason enum (explicit/dependency/recommended/suggested)
-  - [x] Resolver : find_available_suggests() pour découvrir les suggestions
-  - [x] CLI : --no-recommends (ignorer les recommandés)
-  - [x] CLI : --with-suggests (inclure les suggestions)
-  - [x] Prompts interactifs groupés (requested/deps/recommends/suggests)
-  - [x] Erase : détection des suggests/recommends installés comme orphelins
-
-
-## Parsing hdlist.cz (P2)
-
-Les synthesis.hdlist.cz ne contiennent pas toutes les métadonnées.
-Implémenter le parsing des hdlist.cz pour récupérer les headers RPM complets :
-  - [ ] Liste des fichiers contenus dans le paquet
-  - [ ] Description longue
-  - [ ] Changelog
-  - [ ] Scripts (pre/post install/uninstall)
-  - Etc.
-
-Note: urpm/core/hdlist.py existe mais à compléter/vérifier.
-
-
-## Recherche de fichiers - urpmf (P2)
-
-Actuellement `urpm find` cherche quel paquet INSTALLÉ contient un fichier.
-Il faut aussi pouvoir chercher dans les paquets disponibles (non installés).
-
-Cela nécessite :
-  1. Parser les hdlist.cz (voir ci-dessus)
-  2. Indexer les fichiers dans la BDD ou les chercher à la volée
-  3. Supporter les patterns/regex comme urpmf
-
-
-## Internationalisation (P2)
-
-### Traductions de l'interface
-Tous les messages de urpm doivent être traduisibles :
-  - [ ] Utiliser gettext dans les règles de l'art
-  - [ ] Extraire les chaînes traduisibles
-  - [ ] Fichiers .po/.mo pour chaque langue
-
-### Langues à supporter (au minimum celles de urpmi)
-  - Français
-  - Anglais
-  - Allemand
-  - Espagnol
-  - Italien
-  - Portugais (Brésil)
-  - Russe
-  - Autres selon communauté Mageia
-
-
-## Compatibilité Legacy (P2)
-
-### Wrappers urpmi/urpme/urpmq/urpmf
-Créer des wrappers ou alias pour que les utilisateurs puissent continuer à utiliser
-les commandes legacy avec les mêmes options :
-  - urpmi → urpm install (avec mapping des options)
-  - urpme → urpm erase
-  - urpmq → urpm search / show / whatprovides
-  - urpmf → urpm find (recherche fichiers)
-  - urpmi.update → urpm media update
-  - urpmi.addmedia → urpm media add
-
-Options à mapper :
-  - urpmi --auto → urpm install --auto
-  - urpmi --test → urpm install --test
-  - urpme --auto-orphans → urpm autoremove
-  - etc.
-
-
-## Documentation (P3)
-
-### Pages man
-  - urpm(8) - commande principale
-  - urpm-install(8), urpm-erase(8), etc. ou une seule page complète
-  - Traduire dans toutes les langues supportées par urpmi
-
-### Documentation utilisateur
-  - urpm rdepends : expliquer que les nombres entre parenthèses =
-    nombre de paquets qui dépendent de ce paquet (reverse deps directes)
-  - urpm depends : expliquer la notation "capability -> package_fournisseur"
-  - Manuel complet de toutes les commandes et options
-  - Guide de migration urpmi → urpm
-
-
-## Fait (référence)
-
-- [x] Recherche dans les provides (urpm search cherche aussi dans provides)
-- [x] Affichage liste complète dans upgrade (plus de limite à 20 paquets)
-- [x] Affichage liste complète dans autoremove
-- [x] history --delete pour supprimer des transactions
-- [x] Détection des familles versionnées (php8.4, php8.5, etc.)
-- [x] Résolution des paquets virtuels avec préférence famille installée
-- [x] Undo/rollback en transaction unique (gestion dépendances)
-- [x] cleandeps pour nettoyer après transactions interrompues
-- [x] Utilisation de installed-through-deps.list (compatible urpme)
-- [x] Mise à jour de installed-through-deps.list sur install/erase/upgrade/etc.
-- [x] Architecture unifiée autoremove (--orphans, --kernels, --faildeps, --all)
-- [x] Blacklist/redlist avec protection à deux niveaux
-- [x] Commandes config blacklist/redlist/kernel-keep
-- [x] Détection et suppression des orphelins lors de l'upgrade (--noerase-orphans pour garder)
-- [x] Vérification GPG des signatures par défaut (--nosignature pour bypass)
-- [x] Gestion des clés GPG (urpm key list/import/remove)
-- [x] Dépendances faibles (Recommends/Suggests) avec prompts interactifs
-- [x] Erase détecte suggests/recommends installés comme orphelins
+`why pipewire-libs` doit répondre "Y" (chaîne valide), pas "orphelin"
+juste parce que la branche pipewire est cassée. pipewire-libs peut
+être requis par autre chose via une chaîne complète.
+
+**Algo requis :**
+- Explorer TOUTES les chaînes remontantes
+- Éliminer celles avec cassure (paquet manquant)
+- Garder celles qui arrivent à un paquet explicite
+- Orphelin = aucune chaîne valide
+
+**Options de sortie rdepends :**
+- [ ] `--json` (exploitable par why ou outils tiers)
+- [ ] `--tree` (affichage hiérarchique)
+- [ ] `--recursive` (avec déduplication)
+
+**Mutualisation :**
+- [ ] `why` exploite le même graphe que `rdepends`
+- [ ] Code partagé pour construction du graphe
+
+### whatprovides
+- [ ] Contraintes de version (== < <= > >=) pour filtrer
+
+---
+
+## Phase différée (entreprise)
+
+- [ ] Infrastructure advisories (MGASA)
+- [ ] versionlock
+- [ ] downgrade
+- [ ] APIs sécurisées (/api/upgrade, /api/install)
+- [ ] Gestion de parc (inventaire, déploiement)
+- [ ] Console de gestion centralisée
+
+---
