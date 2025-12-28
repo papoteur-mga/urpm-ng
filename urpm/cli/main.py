@@ -95,6 +95,39 @@ def _copy_installed_deps_list(root: str = '/', dest: Path = None):
         pass
 
 
+def print_quickstart_guide():
+    """Print a quick start guide for new users with no media configured."""
+    from . import colors
+
+    media_add_cmd = 'sudo urpm media add Core <mirror_url>'
+
+    print(f"""
+{colors.bold('urpm - Modern package manager for Mageia Linux')}
+
+{colors.warning('No media configured yet!')}
+
+{colors.bold('Quick Start:')}
+
+  1. Import media from existing urpmi configuration:
+     {colors.success('sudo urpm media import')}
+
+  2. Or add media manually:
+     {colors.success(media_add_cmd)}
+
+  3. Start the daemon for P2P sharing and background sync:
+     {colors.success('sudo systemctl start urpmd')}
+
+  4. Install packages:
+     {colors.success('sudo urpm install <package>')}
+
+{colors.bold('Documentation:')}
+  /usr/share/doc/urpm-ng/QUICKSTART.md
+
+{colors.bold('More help:')}
+  urpm --help
+""")
+
+
 class AliasedSubParsersAction(argparse._SubParsersAction):
     """Custom action to support command aliases in argparse."""
     
@@ -998,6 +1031,21 @@ Examples:
     server_ipmode.add_argument(
         'mode', choices=['auto', 'ipv4', 'ipv6', 'dual'],
         help='IP mode: auto, ipv4, ipv6, or dual (dual = prefer ipv4)'
+    )
+
+    # server autoconfig
+    server_autoconfig = server_subparsers.add_parser(
+        'autoconfig', aliases=['auto'],
+        help='Auto-discover and add servers from Mageia mirrorlist'
+    )
+    server_autoconfig.add_argument(
+        '--dry-run', '-n',
+        action='store_true',
+        help='Show what would be added without making changes'
+    )
+    server_autoconfig.add_argument(
+        '--release', '-r',
+        help='Override detected Mageia version (e.g., 9)'
     )
 
     # =========================================================================
@@ -3094,6 +3142,235 @@ def cmd_server_ipmode(args, db: PackageDatabase) -> int:
     old_mode = server.get('ip_mode', 'auto')
     db.set_server_ip_mode(args.name, args.mode)
     print(colors.success(f"Set IP mode for {args.name}: {args.mode} (was {old_mode})"))
+    return 0
+
+
+def cmd_server_autoconfig(args, db: PackageDatabase) -> int:
+    """Handle server autoconfig command - auto-discover servers from Mageia mirrorlist."""
+    from . import colors
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError, HTTPError
+    from urllib.parse import urlparse
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import re
+    import time
+
+    TARGET_SERVERS = 5  # Target number of enabled servers
+
+    # Get system version and arch
+    version = getattr(args, 'release', None)
+    if not version:
+        try:
+            with open('/etc/os-release') as f:
+                for line in f:
+                    if line.startswith('VERSION_ID='):
+                        version = line.strip().split('=')[1].strip('"')
+                        break
+        except (IOError, OSError):
+            pass
+
+    if not version:
+        print(colors.error("Cannot detect Mageia version from /etc/os-release"))
+        print(colors.dim("Use --release to specify manually (e.g., --release 9)"))
+        return 1
+
+    import platform
+    arch = platform.machine()
+
+    # Count existing enabled servers
+    existing_servers = db.list_servers(enabled_only=True)
+    existing_count = len(existing_servers)
+
+    if existing_count >= TARGET_SERVERS:
+        print(f"Already have {existing_count} enabled servers (target: {TARGET_SERVERS})")
+        print(colors.dim("Use 'urpm server remove' to remove some first if needed."))
+        return 0
+
+    needed = TARGET_SERVERS - existing_count
+    print(f"Have {existing_count} enabled servers, need {needed} more to reach {TARGET_SERVERS}")
+
+    # Get all servers for duplicate check
+    all_servers = db.list_servers()
+    existing_urls = set()
+    existing_names = set()
+    for s in all_servers:
+        url = f"{s['protocol']}://{s['host']}{s.get('base_path', '')}".rstrip('/')
+        existing_urls.add(url)
+        existing_names.add(s['name'])
+
+    # Fetch mirrorlist
+    mirrorlist_url = f"https://www.mageia.org/mirrorlist/?release={version}&arch={arch}&section=core&repo=release"
+
+    print(f"Fetching mirrorlist for Mageia {version} ({arch})...", end=' ', flush=True)
+
+    try:
+        with urlopen(mirrorlist_url, timeout=60) as response:
+            content = response.read().decode('utf-8').strip()
+            mirror_urls = content.split('\n') if content else []
+    except (URLError, HTTPError) as e:
+        print(colors.error(f"failed: {e}"))
+        return 1
+
+    if not mirror_urls or not any(u.strip() for u in mirror_urls):
+        print(colors.warning("empty"))
+        print(colors.dim("The mirrorlist may not be available yet for this version."))
+        return 0
+
+    print(f"{len(mirror_urls)} mirrors")
+
+    # Pattern to strip from URLs: {version}/{arch}/media/core/release/
+    suffix_pattern = re.compile(rf'{re.escape(version)}/{re.escape(arch)}/media/core/release/?$')
+
+    # Parse and filter candidates
+    candidates = []
+    skipped_protocol = 0
+    skipped_duplicate = 0
+
+    for url in mirror_urls:
+        url = url.strip()
+        if not url:
+            continue
+
+        parsed = urlparse(url)
+
+        # Filter: only http/https
+        if parsed.scheme not in ('http', 'https'):
+            skipped_protocol += 1
+            continue
+
+        # Extract base path by stripping the suffix
+        base_path = suffix_pattern.sub('', parsed.path).rstrip('/')
+        full_base = f"{parsed.scheme}://{parsed.hostname}{base_path}"
+
+        # Check for duplicate
+        if full_base in existing_urls:
+            skipped_duplicate += 1
+            continue
+
+        candidates.append({
+            'scheme': parsed.scheme,
+            'host': parsed.hostname,
+            'base_path': base_path,
+            'full_url': url,  # Original URL for latency test
+        })
+
+    if not candidates:
+        print("No new servers to add")
+        if skipped_duplicate:
+            print(colors.dim(f"  ({skipped_duplicate} already configured)"))
+        return 0
+
+    print(f"Testing latency to {len(candidates)} candidates...", end=' ', flush=True)
+
+    # Test latency to each candidate in parallel
+    def test_latency(candidate):
+        """Test latency with HEAD request, return (candidate, latency_ms) or (candidate, None)."""
+        test_url = candidate['full_url']
+        try:
+            start = time.time()
+            req = Request(test_url, method='HEAD')
+            with urlopen(req, timeout=5) as resp:
+                latency = (time.time() - start) * 1000
+                return (candidate, latency)
+        except Exception:
+            return (candidate, None)
+
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(test_latency, c): c for c in candidates}
+        for future in as_completed(futures):
+            candidate, latency = future.result()
+            if latency is not None:
+                results.append((candidate, latency))
+
+    print(f"{len(results)} reachable")
+
+    if not results:
+        print(colors.warning("No reachable mirrors found"))
+        return 0
+
+    # Sort by latency and take the best N
+    results.sort(key=lambda x: x[1])
+    best = results[:needed]
+
+    if args.dry_run:
+        print(f"\nWould add {len(best)} server(s):")
+        for candidate, latency in best:
+            print(f"  {candidate['host']} ({latency:.0f}ms)")
+        return 0
+
+    # Add best servers
+    added_servers = []
+    for candidate, latency in best:
+        shortname = candidate['host']
+        # Ensure unique name
+        original = shortname
+        counter = 1
+        while shortname in existing_names:
+            shortname = f"{original}-{counter}"
+            counter += 1
+
+        try:
+            server_id = db.add_server(
+                shortname, candidate['scheme'], candidate['host'], candidate['base_path']
+            )
+            print(colors.success(f"  Added: {shortname} ({latency:.0f}ms)"))
+            existing_names.add(shortname)
+            added_servers.append((server_id, shortname))
+        except Exception as e:
+            print(colors.warning(f"  Failed to add {shortname}: {e}"))
+
+    if not added_servers:
+        return 0
+
+    # Scan enabled media to link with new servers
+    all_media = db.list_media()
+    enabled_media = [m for m in all_media if m.get('enabled', 1)]
+    if not enabled_media:
+        print("\nNo enabled media to scan")
+        return 0
+
+    media_to_scan = [(m['id'], m['name'], m.get('relative_path', ''))
+                     for m in enabled_media if m.get('relative_path')]
+
+    if not media_to_scan:
+        return 0
+
+    print(f"\nScanning {len(media_to_scan)} enabled media...", end=' ', flush=True)
+
+    # For each new server, check which media it provides
+    from ..core.config import build_server_url
+
+    total_links = 0
+    for server_id, server_name in added_servers:
+        server = db.get_server(server_name)
+        base_url = build_server_url(server)
+
+        def check_media(media_id, media_name, relative_path):
+            test_url = f"{base_url}/{relative_path}/media_info/MD5SUM"
+            try:
+                req = Request(test_url, method='HEAD')
+                urlopen(req, timeout=3)
+                return media_id
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(check_media, mid, mname, rpath): mid
+                      for mid, mname, rpath in media_to_scan}
+            for future in as_completed(futures):
+                media_id = future.result()
+                if media_id:
+                    db.link_server_media(server_id, media_id)
+                    total_links += 1
+
+    print(f"{total_links} links created")
+
+    # Summary
+    print(f"\nAdded {len(added_servers)} server(s), now have {existing_count + len(added_servers)} enabled")
+    if skipped_protocol:
+        print(colors.dim(f"Skipped {skipped_protocol} (ftp/other protocol)"))
+
     return 0
 
 
@@ -9671,12 +9948,26 @@ def main(argv=None) -> int:
         display.init(mode='columns', show_all=getattr(args, 'show_all', False))
 
     if not args.command:
-        parser.print_help()
-        return 1
+        # Check if any media is configured
+        try:
+            db = PackageDatabase()
+            media_list = db.list_media()
+        except Exception:
+            # Can't open database or no media - show quick start guide
+            media_list = []
 
-    # Open database
+        if not media_list:
+            # No media configured - show quick start guide
+            print_quickstart_guide()
+            return 0
+        else:
+            # Media exists - show normal help
+            parser.print_help()
+            return 1
+
+    # Open database for command execution
     db = PackageDatabase()
-    
+
     try:
         # Route to command handler
         if args.command in ('install', 'i'):
@@ -9736,6 +10027,8 @@ def main(argv=None) -> int:
                 return cmd_server_test(args, db)
             elif args.server_command == 'ip-mode':
                 return cmd_server_ipmode(args, db)
+            elif args.server_command in ('autoconfig', 'auto'):
+                return cmd_server_autoconfig(args, db)
             else:
                 return cmd_not_implemented(args, db)
 

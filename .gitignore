@@ -46,6 +46,7 @@ env/
 .vscode/
 *.swp
 *.swo
+*.*~
 
 # Cache urpm-ng
 .cache/urpmi-ng/
@@ -53,3 +54,11 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# RPM build
+rpmbuild/SOURCES/*.tar.gz
+rpmbuild/RPMS/
+rpmbuild/SRPMS/
+rpmbuild/BUILD/
+rpmbuild/BUILDROOT/
+rpmbuild/SPECS/*.log

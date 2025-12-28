@@ -25,9 +25,10 @@
 - [ ] Détecter reboot nécessaire (kernel, glibc, systemd)
 - [ ] Lister services à redémarrer
 
-### automatic config
-- [ ] Configuration auto-install dans urpmd
-- [ ] Fichier `/etc/urpm/automatic.conf`
+### daemon config
+- [ ] Fichier `/etc/urpm/daemon.conf`
+- [ ] Options: `log_destination` (syslog|file), `log_file`, `log_level`
+- [ ] Intégrer config auto-install (scheduling, policies)
 
 ### Documentation EN/FR
 - [ ] Pages man
