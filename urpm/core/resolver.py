@@ -540,6 +540,78 @@ class Resolver:
 
         return sorted(provider_names)
 
+    def add_local_rpms(self, rpm_infos: List[Dict]) -> None:
+        """Add local RPM files to the resolver pool.
+
+        This creates a special @LocalRPMs repository containing the local
+        packages so they can be resolved alongside repository packages.
+
+        Args:
+            rpm_infos: List of dicts from read_rpm_header() with package metadata
+        """
+        if self.pool is None:
+            self.pool = self._create_pool()
+
+        # Create local RPMs repository
+        local_repo = self.pool.add_repo("@LocalRPMs")
+        local_repo.appdata = {"type": "local"}
+
+        for info in rpm_infos:
+            s = local_repo.add_solvable()
+            s.name = info['name']
+            epoch = info.get('epoch', 0) or 0
+            if epoch:
+                s.evr = f"{epoch}:{info['version']}-{info['release']}"
+            else:
+                s.evr = f"{info['version']}-{info['release']}"
+            s.arch = info['arch']
+
+            # Versioned self-provide
+            s.add_deparray(solv.SOLVABLE_PROVIDES,
+                self.pool.Dep(info['name']).Rel(solv.REL_EQ, self.pool.Dep(s.evr)))
+
+            # Add provides
+            for cap in info.get('provides', []):
+                if cap and not cap.startswith('rpmlib('):
+                    s.add_deparray(solv.SOLVABLE_PROVIDES, parse_capability(self.pool, cap))
+
+            # Add requires
+            for cap in info.get('requires', []):
+                if cap and not cap.startswith('rpmlib(') and not cap.startswith('/'):
+                    s.add_deparray(solv.SOLVABLE_REQUIRES, parse_capability(self.pool, cap))
+
+            # Add conflicts
+            for cap in info.get('conflicts', []):
+                if cap:
+                    s.add_deparray(solv.SOLVABLE_CONFLICTS, parse_capability(self.pool, cap))
+
+            # Add obsoletes
+            for cap in info.get('obsoletes', []):
+                if cap:
+                    s.add_deparray(solv.SOLVABLE_OBSOLETES, parse_capability(self.pool, cap))
+
+            # Add weak dependencies
+            for cap in info.get('recommends', []):
+                if cap:
+                    s.add_deparray(solv.SOLVABLE_RECOMMENDS, parse_capability(self.pool, cap))
+            for cap in info.get('suggests', []):
+                if cap:
+                    s.add_deparray(solv.SOLVABLE_SUGGESTS, parse_capability(self.pool, cap))
+
+            # Store metadata including the local path
+            self._solvable_to_pkg[s.id] = {
+                'name': info['name'],
+                'evr': s.evr,
+                'arch': info['arch'],
+                'nevra': info['nevra'],
+                'size': info.get('size', 0),
+                'media_name': '@LocalRPMs',
+                'local_path': info['path'],  # Critical: path to the RPM file
+            }
+
+        # Rebuild whatprovides index
+        self.pool.createwhatprovides()
+
     def get_package_requires(self, package_name: str) -> List[str]:
         """Get the requires of a package.
 
@@ -723,7 +795,8 @@ class Resolver:
                         choices: Dict[str, str] = None,
                         favored_packages: set = None,
                         explicit_disfavor: set = None,
-                        preference_patterns: list = None) -> Resolution:
+                        preference_patterns: list = None,
+                        local_packages: set = None) -> Resolution:
         """Resolve packages to install.
 
         Args:
@@ -735,6 +808,8 @@ class Resolver:
                      (from negative preferences like -apache-mod_php)
             preference_patterns: Optional list of name patterns from user preferences
                      (packages matching ALL patterns get INSTALL jobs when competing)
+            local_packages: Optional set of package names from local RPM files
+                     (uses SOLVER_UPDATE to allow upgrading installed packages)
 
         Returns:
             Resolution with success status and package actions.
@@ -748,9 +823,14 @@ class Resolver:
             explicit_disfavor = set()
         if preference_patterns is None:
             preference_patterns = []
+        if local_packages is None:
+            local_packages = set()
 
-        # Reuse existing pool if available, otherwise create new one
-        if self.pool is None:
+        # Preserve pool only if it has @LocalRPMs repo (for local RPM installation)
+        has_local_rpms = self.pool is not None and any(
+            r.name == '@LocalRPMs' for r in self.pool.repos
+        )
+        if not has_local_rpms:
             self._solvable_to_pkg = {}
             self.pool = self._create_pool()
 
@@ -907,8 +987,22 @@ class Resolver:
                             )]
                         )
 
-            if sel.isempty():
+            if sel.isempty() and name not in local_packages:
                 not_found.append(name)
+            elif name in local_packages:
+                # For local packages, find directly in @LocalRPMs repo (pool.select doesn't work)
+                local_solvable = None
+                for repo in self.pool.repos:
+                    if repo.name == '@LocalRPMs':
+                        for s in repo.solvables:
+                            if s.name == name:
+                                local_solvable = s
+                                break
+                        break
+                if local_solvable:
+                    jobs.append(self.pool.Job(solv.Job.SOLVER_INSTALL | solv.Job.SOLVER_SOLVABLE, local_solvable.id))
+                else:
+                    not_found.append(name)
             else:
                 jobs += sel.jobs(solv.Job.SOLVER_INSTALL)
 

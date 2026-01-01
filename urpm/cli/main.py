@@ -4452,7 +4452,8 @@ def _add_preferences_to_choices(pool, resolved_packages: set, choices: dict) -> 
 
 
 def _resolve_with_alternatives(resolver, packages: list, choices: dict,
-                               auto_mode: bool, preferences: 'PreferencesMatcher' = None) -> tuple:
+                               auto_mode: bool, preferences: 'PreferencesMatcher' = None,
+                               local_packages: set = None) -> tuple:
     """Resolve packages, handling alternatives interactively with bloc detection.
 
     Args:
@@ -4461,11 +4462,14 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
         choices: Dict mapping capability -> chosen package (modified in place)
         auto_mode: If True, use first choice automatically; if False, ask user
         preferences: PreferencesMatcher instance
+        local_packages: Set of package names from local RPM files
 
     Returns:
         Tuple of (result, aborted) where result is the Resolution and aborted
         is True if user cancelled during alternative selection.
     """
+    if local_packages is None:
+        local_packages = set()
     from . import colors
     import solv
 
@@ -4530,7 +4534,12 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
         # First pass: create pool and resolve preferences
         if not patterns_resolved:
             # Create pool without solving to resolve preferences
-            resolver.pool = resolver._create_pool()
+            # Preserve pool only if it has @LocalRPMs repo (for local RPM installation)
+            has_local_rpms = resolver.pool is not None and any(
+                r.name == '@LocalRPMs' for r in resolver.pool.repos
+            )
+            if not has_local_rpms:
+                resolver.pool = resolver._create_pool()
             if resolver.pool:
                 preferences.resolve_patterns(resolver.pool)
                 patterns_resolved = True
@@ -4579,7 +4588,8 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
             choices=choices,
             favored_packages=favored,
             explicit_disfavor=preferences.disfavored_packages,
-            preference_patterns=preferences.name_patterns
+            preference_patterns=preferences.name_patterns,
+            local_packages=local_packages
         )
 
         # Handle alternatives (multiple providers for same capability)
@@ -4718,13 +4728,57 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print(colors.error("Error: --nodeps requires --download-only"))
         return 1
 
+    # Separate local RPM files from package names
+    from pathlib import Path
+    from ..core.rpm import is_local_rpm, read_rpm_header
+    from ..core.download import verify_rpm_signature
+
+    local_rpm_paths = []
+    local_rpm_infos = []
+    package_names = []
+    verify_sigs = not getattr(args, 'nosignature', False)
+
+    for pkg in args.packages:
+        if is_local_rpm(pkg):
+            path = Path(pkg)
+            if not path.exists():
+                print(colors.error(f"Error: file not found: {pkg}"))
+                return 1
+            # Read RPM header
+            info = read_rpm_header(path)
+            if not info:
+                print(colors.error(f"Error: cannot read RPM file: {pkg}"))
+                return 1
+            # Verify signature
+            if verify_sigs:
+                valid, error = verify_rpm_signature(path)
+                if not valid:
+                    print(colors.error(f"Error: signature verification failed for {pkg}"))
+                    print(colors.error(f"  {error}"))
+                    print(colors.dim("  Use --nosignature to skip verification (not recommended)"))
+                    return 1
+            local_rpm_paths.append(str(path.resolve()))
+            local_rpm_infos.append(info)
+        else:
+            package_names.append(pkg)
+
+    # If we have local RPMs, show what we're installing
+    if local_rpm_infos:
+        print(f"Local RPM files ({len(local_rpm_infos)}):")
+        for info in local_rpm_infos:
+            print(f"  {info['nevra']}")
+
     # Resolve virtual packages to concrete packages
     # This handles cases like php-opcache → php8.5-opcache based on what's installed
     auto_mode = getattr(args, 'auto', False)
     install_all = getattr(args, 'all', False)
 
     resolved_packages = []
-    for pkg in args.packages:
+    # Add local RPM names to the list
+    for info in local_rpm_infos:
+        resolved_packages.append(info['name'])
+    # Resolve virtual packages from command line
+    for pkg in package_names:
         pkg_name = _extract_pkg_name(pkg)
         concrete = _resolve_virtual_package(db, pkg_name, auto_mode, install_all)
         resolved_packages.extend(concrete)
@@ -4763,6 +4817,10 @@ def cmd_install(args, db: PackageDatabase) -> int:
     resolver = Resolver(db, install_recommends=initial_recommends)
     choices = {}
 
+    # Add local RPMs to resolver pool before resolution
+    if local_rpm_infos:
+        resolver.add_local_rpms(local_rpm_infos)
+
     if nodeps:
         # --nodeps: build actions directly without dependency resolution
         from ..core.resolver import PackageAction, TransactionType, Resolution
@@ -4798,8 +4856,11 @@ def cmd_install(args, db: PackageDatabase) -> int:
         aborted = False
     else:
         # Normal resolution with user choices for alternatives
+        # Build set of local package names for SOLVER_UPDATE
+        local_pkg_names = {info['name'] for info in local_rpm_infos}
         result, aborted = _resolve_with_alternatives(
-            resolver, resolved_packages, choices, args.auto, preferences
+            resolver, resolved_packages, choices, args.auto, preferences,
+            local_packages=local_pkg_names
         )
     if aborted:
         return 1
@@ -4809,6 +4870,29 @@ def cmd_install(args, db: PackageDatabase) -> int:
         for p in result.problems:
             print(f"  {p}")
         return 1
+
+    # Handle --reinstall for local RPMs that are already installed at same version
+    reinstall_mode = getattr(args, 'reinstall', False)
+    if reinstall_mode and local_rpm_infos:
+        from ..core.resolver import PackageAction, TransactionType
+        actions_names = {a.name for a in result.actions}
+        for info in local_rpm_infos:
+            if info['name'] not in actions_names:
+                # Package not in actions = already installed at same version
+                # Add as REINSTALL action
+                epoch = info.get('epoch', 0) or 0
+                evr = f"{epoch}:{info['version']}-{info['release']}" if epoch else f"{info['version']}-{info['release']}"
+                reinstall_action = PackageAction(
+                    action=TransactionType.REINSTALL,
+                    name=info['name'],
+                    evr=evr,
+                    arch=info['arch'],
+                    nevra=info['nevra'],
+                    size=info.get('size', 0) or 0,
+                    media_name='@LocalRPMs',
+                    reason=InstallReason.EXPLICIT
+                )
+                result.actions.append(reinstall_action)
 
     if not result.actions:
         print("Nothing to do")
@@ -4874,8 +4958,11 @@ def cmd_install(args, db: PackageDatabase) -> int:
 
     if need_reresolve:
         resolver = Resolver(db, install_recommends=install_recommends_final)
+        if local_rpm_infos:
+            resolver.add_local_rpms(local_rpm_infos)
         result, aborted = _resolve_with_alternatives(
-            resolver, final_packages, choices, args.auto, preferences
+            resolver, final_packages, choices, args.auto, preferences,
+            local_packages=local_pkg_names
         )
         if aborted:
             return 1
@@ -4899,8 +4986,11 @@ def cmd_install(args, db: PackageDatabase) -> int:
 
                 # Retry resolution
                 resolver = Resolver(db, install_recommends=install_recommends_final)
+                if local_rpm_infos:
+                    resolver.add_local_rpms(local_rpm_infos)
                 result, aborted = _resolve_with_alternatives(
-                    resolver, retry_packages, choices, args.auto, preferences
+                    resolver, retry_packages, choices, args.auto, preferences,
+                    local_packages=local_pkg_names
                 )
                 if aborted:
                     return 1
@@ -4944,7 +5034,7 @@ def cmd_install(args, db: PackageDatabase) -> int:
     dep_size = sum(a.size for a in dep_pkgs)
     rec_size = sum(a.size for a in rec_pkgs)
     sug_size = sum(a.size for a in sug_pkgs)
-    total_size = sum(a.size for a in final_actions if a.action.value in ('install', 'upgrade'))
+    total_size = sum(a.size for a in final_actions if a.action.value in ('install', 'upgrade', 'reinstall'))
 
     # Show final transaction summary
     print(f"\n{colors.bold('Transaction summary:')}\n")
@@ -4995,14 +5085,37 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print("\n(dry run - no changes made)")
         return 0
 
-    # Build download items
-    print(colors.info("\nDownloading packages..."))
+    # Build download items (skip local RPMs - we already have them)
     download_items = []
+    local_action_paths = []  # Paths for local RPMs from resolver
     media_cache = {}
     servers_cache = {}  # media_id -> list of server dicts
 
     for action in result.actions:
         media_name = action.media_name
+
+        # Local RPMs don't need download - get path from resolver metadata or local_rpm_infos
+        if media_name == '@LocalRPMs':
+            pkg_info = resolver._solvable_to_pkg.get(action.nevra)
+            if not pkg_info:
+                # Find by name+evr+arch match in resolver
+                for sid, info in resolver._solvable_to_pkg.items():
+                    if (info.get('name') == action.name and
+                        info.get('evr') == action.evr and
+                        info.get('arch') == action.arch and
+                        info.get('media_name') == '@LocalRPMs'):
+                        pkg_info = info
+                        break
+            if not pkg_info:
+                # Fallback: find in local_rpm_infos (for --reinstall actions)
+                for info in local_rpm_infos:
+                    if info.get('name') == action.name:
+                        pkg_info = info
+                        break
+            if pkg_info and pkg_info.get('local_path', pkg_info.get('path')):
+                local_action_paths.append(pkg_info.get('local_path') or pkg_info.get('path'))
+            continue
+
         if media_name not in media_cache:
             media = db.get_media(media_name)
             media_cache[media_name] = media
@@ -5054,97 +5167,104 @@ def cmd_install(args, db: PackageDatabase) -> int:
         else:
             print(f"  Warning: no URL or servers for media '{media_name}'")
 
-    # Download with progress
-    use_peers = not getattr(args, 'no_peers', False)
-    downloader = Downloader(use_peers=use_peers, db=db)
+    # Download remote packages (if any)
+    dl_results = []
+    downloaded = 0
+    cached = 0
+    peer_stats = {}
 
-    last_lines_count = [0]  # Track how many lines we displayed last time
+    if download_items:
+        print(colors.info("\nDownloading packages..."))
+        use_peers = not getattr(args, 'no_peers', False)
+        downloader = Downloader(use_peers=use_peers, db=db)
 
-    def progress(name, pkg_num, pkg_total, bytes_done, bytes_total,
-                 item_bytes=None, item_total=None, active_downloads=None):
-        pct = (bytes_done * 100 // bytes_total) if bytes_total > 0 else 0
+        last_lines_count = [0]  # Track how many lines we displayed last time
 
-        # Move cursor to start of our display block
-        # \033[F = CPL (Cursor Previous Line) - moves up AND to column 0
-        if last_lines_count[0] > 1:
-            # Move up (N-1) lines to get to the first line
-            print(f"\033[{last_lines_count[0] - 1}F", end='')
-        elif last_lines_count[0] == 1:
-            # Just go to beginning of current line
-            print(f"\r", end='')
+        def progress(name, pkg_num, pkg_total, bytes_done, bytes_total,
+                     item_bytes=None, item_total=None, active_downloads=None):
+            pct = (bytes_done * 100 // bytes_total) if bytes_total > 0 else 0
 
-        # Show all active downloads if available
-        # Format: (slot, name, bytes_done, bytes_total) sorted by slot
-        if active_downloads and len(active_downloads) > 0:
-            num_lines = len(active_downloads)
-            for i, (slot, dl_name, dl_bytes, dl_total) in enumerate(active_downloads):
-                if dl_total and dl_total > 0:
-                    bar_width = 20
-                    filled = dl_bytes * bar_width // dl_total
-                    bar = '█' * filled + '░' * (bar_width - filled)
-                    dl_mb = dl_bytes / (1024 * 1024)
-                    total_mb = dl_total / (1024 * 1024)
-                    line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name} [{bar}] {dl_mb:.1f}/{total_mb:.1f}MB"
-                else:
-                    line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name}"
-
-                # Clear line and print content
-                if i < num_lines - 1:
-                    print(f"\033[K{line}")  # with newline
-                else:
-                    print(f"\033[K{line}", end='', flush=True)  # last line, no newline
-
-            # Clear any extra lines from previous display
-            if last_lines_count[0] > num_lines:
-                for _ in range(last_lines_count[0] - num_lines):
-                    print(f"\n\033[K", end='')
-                # Move back up to end of our content
-                print(f"\033[{last_lines_count[0] - num_lines}F", end='', flush=True)
-
-            last_lines_count[0] = num_lines
-        elif item_bytes is not None and item_total and item_total > 0:
-            # Single download with progress
-            bar_width = 20
-            filled = item_bytes * bar_width // item_total
-            bar = '█' * filled + '░' * (bar_width - filled)
-            item_mb = item_bytes / (1024 * 1024)
-            total_mb = item_total / (1024 * 1024)
-            print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name} [{bar}] {item_mb:.1f}/{total_mb:.1f}MB", end='', flush=True)
-            # Clear extra lines if we went from multi to single
+            # Move cursor to start of our display block
+            # \033[F = CPL (Cursor Previous Line) - moves up AND to column 0
             if last_lines_count[0] > 1:
-                for _ in range(last_lines_count[0] - 1):
-                    print(f"\n\033[K", end='')
-                print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
-            last_lines_count[0] = 1
+                # Move up (N-1) lines to get to the first line
+                print(f"\033[{last_lines_count[0] - 1}F", end='')
+            elif last_lines_count[0] == 1:
+                # Just go to beginning of current line
+                print(f"\r", end='')
+
+            # Show all active downloads if available
+            # Format: (slot, name, bytes_done, bytes_total) sorted by slot
+            if active_downloads and len(active_downloads) > 0:
+                num_lines = len(active_downloads)
+                for i, (slot, dl_name, dl_bytes, dl_total) in enumerate(active_downloads):
+                    if dl_total and dl_total > 0:
+                        bar_width = 20
+                        filled = dl_bytes * bar_width // dl_total
+                        bar = '█' * filled + '░' * (bar_width - filled)
+                        dl_mb = dl_bytes / (1024 * 1024)
+                        total_mb = dl_total / (1024 * 1024)
+                        line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name} [{bar}] {dl_mb:.1f}/{total_mb:.1f}MB"
+                    else:
+                        line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name}"
+
+                    # Clear line and print content
+                    if i < num_lines - 1:
+                        print(f"\033[K{line}")  # with newline
+                    else:
+                        print(f"\033[K{line}", end='', flush=True)  # last line, no newline
+
+                # Clear any extra lines from previous display
+                if last_lines_count[0] > num_lines:
+                    for _ in range(last_lines_count[0] - num_lines):
+                        print(f"\n\033[K", end='')
+                    # Move back up to end of our content
+                    print(f"\033[{last_lines_count[0] - num_lines}F", end='', flush=True)
+
+                last_lines_count[0] = num_lines
+            elif item_bytes is not None and item_total and item_total > 0:
+                # Single download with progress
+                bar_width = 20
+                filled = item_bytes * bar_width // item_total
+                bar = '█' * filled + '░' * (bar_width - filled)
+                item_mb = item_bytes / (1024 * 1024)
+                total_mb = item_total / (1024 * 1024)
+                print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name} [{bar}] {item_mb:.1f}/{total_mb:.1f}MB", end='', flush=True)
+                # Clear extra lines if we went from multi to single
+                if last_lines_count[0] > 1:
+                    for _ in range(last_lines_count[0] - 1):
+                        print(f"\n\033[K", end='')
+                    print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
+                last_lines_count[0] = 1
+            else:
+                # No active downloads - just show package name
+                print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name}", end='', flush=True)
+                if last_lines_count[0] > 1:
+                    for _ in range(last_lines_count[0] - 1):
+                        print(f"\n\033[K", end='')
+                    print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
+                last_lines_count[0] = 1
+
+        dl_results, downloaded, cached, peer_stats = downloader.download_all(download_items, progress)
+        # Final newline after progress
+        print()
+
+        # Check for failures
+        failed = [r for r in dl_results if not r.success]
+        if failed:
+            print(colors.error(f"\n{len(failed)} download(s) failed:"))
+            for r in failed[:5]:
+                print(f"  {colors.error(r.item.name)}: {r.error}")
+            return 1
+
+        # Download summary with P2P stats
+        cache_str = colors.warning(str(cached)) if cached > 0 else colors.dim(str(cached))
+        from_peers = peer_stats.get('from_peers', 0)
+        from_upstream = peer_stats.get('from_upstream', 0)
+        if from_peers > 0:
+            print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache")
         else:
-            # No active downloads - just show package name
-            print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name}", end='', flush=True)
-            if last_lines_count[0] > 1:
-                for _ in range(last_lines_count[0] - 1):
-                    print(f"\n\033[K", end='')
-                print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
-            last_lines_count[0] = 1
-
-    dl_results, downloaded, cached, peer_stats = downloader.download_all(download_items, progress)
-    # Final newline after progress
-    print()
-
-    # Check for failures
-    failed = [r for r in dl_results if not r.success]
-    if failed:
-        print(colors.error(f"\n{len(failed)} download(s) failed:"))
-        for r in failed[:5]:
-            print(f"  {colors.error(r.item.name)}: {r.error}")
-        return 1
-
-    # Download summary with P2P stats
-    cache_str = colors.warning(str(cached)) if cached > 0 else colors.dim(str(cached))
-    from_peers = peer_stats.get('from_peers', 0)
-    from_upstream = peer_stats.get('from_upstream', 0)
-    if from_peers > 0:
-        print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache")
-    else:
-        print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache")
+            print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache")
 
     # Handle --download-only mode
     download_only = getattr(args, 'download_only', False)
@@ -5152,8 +5272,9 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print(colors.success("\nPackages downloaded to cache. Use 'urpm install' to install them later."))
         return 0
 
-    # Collect RPM paths for installation
+    # Collect RPM paths for installation (downloaded + local)
     rpm_paths = [r.path for r in dl_results if r.success and r.path]
+    rpm_paths.extend(local_action_paths)  # Add local RPM files
 
     if not rpm_paths:
         print("No packages to install")
