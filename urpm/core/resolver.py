@@ -25,6 +25,130 @@ from .compression import decompress_stream
 # Debug flag for resolver - set to True to enable debug output
 DEBUG_RESOLVER = False
 
+
+class SolverDebug:
+    """Debug helper for solver resolution.
+
+    Provides structured debug output for remote troubleshooting.
+    Usage:
+        debug = SolverDebug(enabled=True, watched=['pkg1', 'pkg2'])
+        debug.log("Pool created")
+        debug.watch("pkg1", "Found installed", "1.0-1.mga10")
+    """
+
+    def __init__(self, enabled: bool = False, watched: List[str] = None):
+        self.enabled = enabled
+        self.watched = set(w.lower() for w in (watched or []))
+
+    def log(self, msg: str, indent: int = 0):
+        """Print a debug message."""
+        if self.enabled:
+            prefix = "  " * indent
+            print(f"[SOLVER] {prefix}{msg}")
+
+    def watch(self, pkg_name: str, action: str, detail: str = ""):
+        """Print a watched package message."""
+        if self.enabled and pkg_name.lower() in self.watched:
+            detail_str = f": {detail}" if detail else ""
+            print(f"[WATCH:{pkg_name}] {action}{detail_str}")
+
+    def is_watched(self, pkg_name: str) -> bool:
+        """Check if a package is being watched."""
+        return pkg_name.lower() in self.watched
+
+    def log_pool_stats(self, pool):
+        """Log pool statistics."""
+        if not self.enabled:
+            return
+        total_solvables = sum(1 for _ in pool.solvables)
+        installed_count = sum(1 for _ in pool.installed.solvables) if pool.installed else 0
+        repo_count = len(pool.repos)
+        self.log(f"Pool: {total_solvables} solvables, {installed_count} installed, {repo_count} repos")
+        for repo in pool.repos:
+            count = sum(1 for _ in repo.solvables)
+            self.log(f"Repo '{repo.name}': {count} packages", indent=1)
+
+    def log_selection(self, name: str, selection, context: str = ""):
+        """Log a selection result."""
+        if not self.enabled:
+            return
+        solvables = list(selection.solvables())
+        ctx = f" ({context})" if context else ""
+        if not solvables:
+            self.log(f"Select '{name}'{ctx}: no match")
+        else:
+            self.log(f"Select '{name}'{ctx}: {len(solvables)} match(es)")
+            # Show first few matches
+            for s in solvables[:5]:
+                repo_name = s.repo.name if s.repo else "?"
+                self.log(f"{s} [{repo_name}]", indent=1)
+            if len(solvables) > 5:
+                self.log(f"... and {len(solvables) - 5} more", indent=1)
+
+    def log_jobs(self, jobs):
+        """Log solver jobs."""
+        if not self.enabled:
+            return
+        self.log(f"Jobs: {len(jobs)}")
+        for job in jobs[:10]:
+            self.log(f"{job}", indent=1)
+        if len(jobs) > 10:
+            self.log(f"... and {len(jobs) - 10} more jobs", indent=1)
+
+    def log_problems(self, problems):
+        """Log solver problems."""
+        if not self.enabled:
+            return
+        self.log(f"Problems: {len(problems)}")
+        for p in problems:
+            self.log(f"{p}", indent=1)
+
+    def log_transaction(self, trans):
+        """Log transaction details."""
+        if not self.enabled:
+            return
+        if trans.isempty():
+            self.log("Transaction: empty (nothing to do)")
+            return
+
+        # Count by type
+        installs = []
+        erases = []
+        upgrades = []
+
+        for cl in trans.classify():
+            for p in cl.solvables():
+                if cl.type == solv.Transaction.SOLVER_TRANSACTION_INSTALL:
+                    installs.append(p)
+                elif cl.type == solv.Transaction.SOLVER_TRANSACTION_ERASE:
+                    erases.append(p)
+                elif cl.type in (solv.Transaction.SOLVER_TRANSACTION_UPGRADE,
+                                 solv.Transaction.SOLVER_TRANSACTION_DOWNGRADE):
+                    upgrades.append(p)
+
+        self.log(f"Transaction: {len(installs)} install, {len(erases)} erase, {len(upgrades)} upgrade")
+
+        # Log watched packages in transaction
+        for p in installs + upgrades:
+            if self.is_watched(p.name):
+                self.watch(p.name, "In transaction", str(p))
+
+
+# Global debug instance (set by CLI)
+_solver_debug = SolverDebug()
+
+
+def set_solver_debug(enabled: bool = False, watched: List[str] = None):
+    """Set global solver debug options."""
+    global _solver_debug
+    _solver_debug = SolverDebug(enabled=enabled, watched=watched)
+
+
+def get_solver_debug() -> SolverDebug:
+    """Get global solver debug instance."""
+    return _solver_debug
+
+
 # Regex to parse capability strings like "name[op version]"
 CAP_REGEX = re.compile(r'^([^\[]+)(?:\[([<>=!]+)\s*(.+)\])?$')
 
@@ -1581,6 +1705,11 @@ class Resolver:
         Returns:
             Resolution with success status and package actions
         """
+        debug = get_solver_debug()
+        debug.log("=== resolve_upgrade() ===")
+        debug.log(f"package_names: {package_names}")
+        debug.log(f"local_packages: {local_packages}")
+
         if local_packages is None:
             local_packages = set()
 
@@ -1591,6 +1720,7 @@ class Resolver:
         if not has_local_rpms:
             self._solvable_to_pkg = {}
             self.pool = self._create_pool()
+            debug.log_pool_stats(self.pool)
 
         jobs = []
 
@@ -1599,6 +1729,8 @@ class Resolver:
             not_found = []
             not_installed = []
             for name in package_names:
+                debug.log(f"Processing package: {name}")
+                debug.watch(name, "Processing for upgrade")
                 # Local packages: find in @LocalRPMs repo and use SOLVER_INSTALL
                 if name in local_packages:
                     local_solvable = None
@@ -1621,31 +1753,45 @@ class Resolver:
                              solv.Selection.SELECTION_DOTARCH |
                              solv.Selection.SELECTION_INSTALLED_ONLY)
                 inst_sel = self.pool.select(name, inst_flags)
+                debug.log_selection(name, inst_sel, "installed, exact")
 
                 if inst_sel.isempty():
                     # Try glob
                     inst_sel = self.pool.select(name, solv.Selection.SELECTION_GLOB |
                                                 solv.Selection.SELECTION_INSTALLED_ONLY)
+                    debug.log_selection(name, inst_sel, "installed, glob")
 
                 if inst_sel.isempty():
+                    debug.log(f"NOT INSTALLED: {name}")
+                    debug.watch(name, "Not found in installed packages")
                     not_installed.append(name)
                     continue
+
+                # Log what we found installed
+                for s in inst_sel.solvables():
+                    debug.watch(name, f"Found installed: {s}")
 
                 # Now select from ALL repos (not just installed) for the update
                 flags = (solv.Selection.SELECTION_NAME |
                         solv.Selection.SELECTION_CANON |
                         solv.Selection.SELECTION_DOTARCH)
                 sel = self.pool.select(name, flags)
+                debug.log_selection(name, sel, "all repos, exact")
 
                 if sel.isempty():
                     sel = self.pool.select(name, solv.Selection.SELECTION_GLOB)
+                    debug.log_selection(name, sel, "all repos, glob")
 
                 if sel.isempty():
+                    debug.log(f"NOT FOUND in any repo: {name}")
                     not_found.append(name)
                 else:
-                    jobs += sel.jobs(solv.Job.SOLVER_UPDATE)
+                    new_jobs = sel.jobs(solv.Job.SOLVER_UPDATE)
+                    debug.log(f"Adding {len(new_jobs)} UPDATE job(s) for {name}")
+                    jobs += new_jobs
 
             if not_installed:
+                debug.log(f"FAILED: packages not installed: {not_installed}")
                 return Resolution(
                     success=False,
                     actions=[],
@@ -1653,6 +1799,7 @@ class Resolver:
                 )
 
             if not_found:
+                debug.log(f"FAILED: packages not found: {not_found}")
                 return Resolution(
                     success=False,
                     actions=[],
@@ -1661,15 +1808,42 @@ class Resolver:
         else:
             # Find installed packages that have updates available
             # and create SOLVER_INSTALL jobs for the newer versions
+            debug.log("Full system upgrade: scanning for available updates...")
             updates_found = 0
             for installed_pkg in self.pool.installed.solvables:
+                is_watched = debug.is_watched(installed_pkg.name)
+
                 # Find the best available version of this package
                 sel = self.pool.select(installed_pkg.name, solv.Selection.SELECTION_NAME)
                 best_available = None
+                available_versions = []
                 for s in sel.solvables():
                     if s.repo != self.pool.installed:
+                        available_versions.append(s)
                         if best_available is None or s.evrcmp(best_available) > 0:
                             best_available = s
+
+                # Debug output for watched packages
+                if is_watched:
+                    debug.watch(installed_pkg.name, f"Installed: {installed_pkg}")
+                    if available_versions:
+                        for av in available_versions[:5]:
+                            debug.watch(installed_pkg.name, f"Available: {av} [{av.repo.name}]")
+                        if len(available_versions) > 5:
+                            debug.watch(installed_pkg.name, f"... and {len(available_versions) - 5} more versions")
+                    else:
+                        debug.watch(installed_pkg.name, "No versions available in repos")
+
+                    if best_available:
+                        cmp_result = best_available.evrcmp(installed_pkg)
+                        if cmp_result > 0:
+                            debug.watch(installed_pkg.name, f"UPGRADE: {installed_pkg.evr} -> {best_available.evr}")
+                        elif cmp_result == 0:
+                            debug.watch(installed_pkg.name, f"SAME VERSION: {installed_pkg.evr} == {best_available.evr}")
+                        else:
+                            debug.watch(installed_pkg.name, f"DOWNGRADE (skipped): {installed_pkg.evr} > {best_available.evr}")
+                    else:
+                        debug.watch(installed_pkg.name, "NO UPGRADE: no available version found")
 
                 # If there's a newer version available, add an install job for it
                 if best_available and best_available.evrcmp(installed_pkg) > 0:
@@ -1679,7 +1853,10 @@ class Resolver:
                     ))
                     updates_found += 1
 
+            debug.log(f"Found {updates_found} packages with updates available")
+
             if updates_found == 0:
+                debug.log("No updates found, returning empty resolution")
                 return Resolution(
                     success=True,
                     actions=[],
@@ -1687,6 +1864,8 @@ class Resolver:
                 )
 
         # Solve
+        debug.log_jobs(jobs)
+        debug.log("Running solver...")
         solver = self.pool.Solver()
         # Allow vendor changes and arch changes for upgrades
         solver.set_flag(solv.Solver.SOLVER_FLAG_ALLOW_VENDORCHANGE, 1)
@@ -1703,6 +1882,7 @@ class Resolver:
         problems = solver.solve(jobs)
 
         if problems:
+            debug.log_problems(problems)
             return Resolution(
                 success=False,
                 actions=[],
@@ -1711,7 +1891,9 @@ class Resolver:
 
         # Get transaction
         trans = solver.transaction()
+        debug.log_transaction(trans)
         if trans.isempty():
+            debug.log("Transaction is empty, nothing to do")
             return Resolution(
                 success=True,
                 actions=[],

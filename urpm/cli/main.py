@@ -201,6 +201,21 @@ def create_parser() -> argparse.ArgumentParser:
         help='Show all items without truncation'
     )
 
+    # Parent parser for debug options (inherited by install/upgrade/etc.)
+    debug_parent = argparse.ArgumentParser(add_help=False)
+    debug_parent.add_argument(
+        '--debug',
+        type=str,
+        metavar='COMPONENT',
+        help='Enable debug output (solver, download, all)'
+    )
+    debug_parent.add_argument(
+        '--watched',
+        type=str,
+        metavar='PACKAGES',
+        help='Watch specific packages during resolution (comma-separated)'
+    )
+
     # Register custom action for aliases
     parser.register('action', 'parsers', AliasedSubParsersAction)
 
@@ -210,8 +225,9 @@ def create_parser() -> argparse.ArgumentParser:
         metavar='<command>'
     )
 
-    # Store parent for use by subparsers
+    # Store parents for use by subparsers
     parser._display_parent = display_parent
+    parser._debug_parent = debug_parent
     
     # =========================================================================
     # install / i
@@ -219,7 +235,7 @@ def create_parser() -> argparse.ArgumentParser:
     install_parser = subparsers.add_parser(
         'install', aliases=['i'],
         help='Install packages',
-        parents=[display_parent]
+        parents=[display_parent, debug_parent]
     )
     install_parser.add_argument(
         'packages', nargs='+',
@@ -589,7 +605,7 @@ def create_parser() -> argparse.ArgumentParser:
     update_parser = subparsers.add_parser(
         'update', aliases=['up'],
         help='Update packages or metadata',
-        parents=[display_parent]
+        parents=[display_parent, debug_parent]
     )
     update_parser.add_argument(
         'packages', nargs='*',
@@ -642,7 +658,7 @@ def create_parser() -> argparse.ArgumentParser:
     upgrade_parser = subparsers.add_parser(
         'upgrade', aliases=['u'],
         help='Upgrade packages (all if none specified)',
-        parents=[display_parent]
+        parents=[display_parent, debug_parent]
     )
     upgrade_parser.add_argument(
         'packages', nargs='*',
@@ -4673,7 +4689,7 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
 def cmd_install(args, db: PackageDatabase) -> int:
     """Handle install command."""
     import signal
-    from ..core.resolver import Resolver, Resolution, format_size
+    from ..core.resolver import Resolver, Resolution, format_size, set_solver_debug
     from ..core.download import Downloader, DownloadItem
     from ..core.background_install import (
         check_background_error, clear_background_error,
@@ -4681,6 +4697,14 @@ def cmd_install(args, db: PackageDatabase) -> int:
     )
     from ..core.transaction_queue import TransactionQueue
     from . import colors
+
+    # Set up solver debug if requested
+    debug_solver = getattr(args, 'debug', None) in ('solver', 'all')
+    watched_pkgs = getattr(args, 'watched', None)
+    if watched_pkgs:
+        watched_pkgs = [p.strip() for p in watched_pkgs.split(',')]
+    if debug_solver or watched_pkgs:
+        set_solver_debug(enabled=debug_solver, watched=watched_pkgs)
 
     # Check for previous background install errors
     prev_error = check_background_error()
@@ -5634,12 +5658,20 @@ def cmd_update(args, db: PackageDatabase) -> int:
         args.name = None  # Update all
         return cmd_media_update(args, db)
 
-    from ..core.resolver import Resolver, format_size
+    from ..core.resolver import Resolver, format_size, set_solver_debug
     from ..core.download import Downloader, DownloadItem
     from ..core.install import Installer, check_root
     from pathlib import Path
     from ..core.rpm import is_local_rpm, read_rpm_header
     from ..core.download import verify_rpm_signature
+
+    # Set up solver debug if requested
+    debug_solver = getattr(args, 'debug', None) in ('solver', 'all')
+    watched_pkgs = getattr(args, 'watched', None)
+    if watched_pkgs:
+        watched_pkgs = [p.strip() for p in watched_pkgs.split(',')]
+    if debug_solver or watched_pkgs:
+        set_solver_debug(enabled=debug_solver, watched=watched_pkgs)
 
     # Determine what to upgrade
     packages = getattr(args, 'packages', []) or []
