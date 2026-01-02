@@ -13,6 +13,7 @@ Provides a modern CLI with short aliases:
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from .. import __version__
@@ -5193,7 +5194,9 @@ def cmd_install(args, db: PackageDatabase) -> int:
                 slots_status or [], global_speed
             )
 
+        download_start = time.time()
         dl_results, downloaded, cached, peer_stats = downloader.download_all(download_items, progress)
+        download_elapsed = time.time() - download_start
         progress_display.finish()
 
         # Check for failures
@@ -5204,14 +5207,15 @@ def cmd_install(args, db: PackageDatabase) -> int:
                 print(f"  {colors.error(r.item.name)}: {r.error}")
             return 1
 
-        # Download summary with P2P stats
+        # Download summary with P2P stats and timing
         cache_str = colors.warning(str(cached)) if cached > 0 else colors.dim(str(cached))
         from_peers = peer_stats.get('from_peers', 0)
         from_upstream = peer_stats.get('from_upstream', 0)
+        time_str = display.format_duration(download_elapsed)
         if from_peers > 0:
-            print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache")
+            print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache in {time_str}")
         else:
-            print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache")
+            print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache in {time_str}")
 
     # Handle --download-only mode
     download_only = getattr(args, 'download_only', False)
@@ -5903,7 +5907,9 @@ def cmd_update(args, db: PackageDatabase) -> int:
                 slots_status or [], global_speed
             )
 
+        download_start = time.time()
         dl_results, downloaded, cached, peer_stats = downloader.download_all(download_items, progress)
+        download_elapsed = time.time() - download_start
         progress_display.finish()
 
         # Check failures
@@ -5914,14 +5920,15 @@ def cmd_update(args, db: PackageDatabase) -> int:
                 print(f"  {colors.error(r.item.name)}: {r.error}")
             return 1
 
-        # Download summary with P2P stats
+        # Download summary with P2P stats and timing
         cache_str = colors.warning(str(cached)) if cached > 0 else colors.dim(str(cached))
         from_peers = peer_stats.get('from_peers', 0)
         from_upstream = peer_stats.get('from_upstream', 0)
+        time_str = display.format_duration(download_elapsed)
         if from_peers > 0:
-            print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache")
+            print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache in {time_str}")
         else:
-            print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache")
+            print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache in {time_str}")
 
         rpm_paths = [r.path for r in dl_results if r.success and r.path]
     else:

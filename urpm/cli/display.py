@@ -284,6 +284,32 @@ def format_speed(bytes_per_sec: float) -> str:
         return f"{bytes_per_sec / (1024 * 1024):.1f}MB/s"
 
 
+def format_duration(seconds: float) -> str:
+    """Format duration as human-readable string.
+
+    Examples:
+        45 -> "45s"
+        90 -> "1min 30s"
+        3665 -> "1h 1min 5s"
+    """
+    if seconds < 60:
+        return f"{int(seconds)}s"
+
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes < 60:
+        if secs > 0:
+            return f"{minutes}min {secs}s"
+        return f"{minutes}min"
+
+    hours, mins = divmod(minutes, 60)
+    parts = [f"{hours}h"]
+    if mins > 0:
+        parts.append(f"{mins}min")
+    if secs > 0:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
 class DownloadProgressDisplay:
     """Handles multi-line download progress display with proper terminal control.
 
@@ -337,8 +363,12 @@ class DownloadProgressDisplay:
         # Header is like "  [12/14] 14%" - we want slots to align after it
         header_padding = " " * 14  # Approximate alignment
 
-        # Worker slots
-        for slot, progress in slots_status:
+        # Ensure we always have num_workers slots (fill missing with None)
+        slots_dict = {slot: prog for slot, prog in slots_status} if slots_status else {}
+        full_slots = [(i, slots_dict.get(i)) for i in range(self.num_workers)]
+
+        # Worker slots (always show all slots for consistent line count)
+        for slot, progress in full_slots:
             slot_num = f"#{slot + 1}"
 
             if progress is None:
@@ -353,7 +383,7 @@ class DownloadProgressDisplay:
 
                 # Progress bar
                 if progress.bytes_total > 0:
-                    filled = progress.bytes_done * self.bar_width // progress.bytes_total
+                    filled = min(self.bar_width, max(0, progress.bytes_done * self.bar_width // progress.bytes_total))
                     bar = '█' * filled + '░' * (self.bar_width - filled)
 
                     # Size info
@@ -381,32 +411,42 @@ class DownloadProgressDisplay:
         Args:
             Same as render()
         """
-        # Move cursor to start of our display block
-        if self.last_lines_count > 1:
-            print(f"\033[{self.last_lines_count - 1}F", end='')
-        elif self.last_lines_count == 1:
-            print(f"\r", end='')
+        import sys
 
-        # Render and print
+        # Get terminal width to truncate lines (avoid wrapping issues)
+        term_width = get_terminal_width()
+
+        # Render first to know how many lines we'll have
         output = self.render(pkg_num, pkg_total, bytes_done, bytes_total,
                             slots_status, global_speed)
         output_lines = output.split('\n')
         num_lines = len(output_lines)
 
-        for i, line in enumerate(output_lines):
-            if i < num_lines - 1:
-                print(f"\033[K{line}")
-            else:
-                print(f"\033[K{line}", end='', flush=True)
+        # Move cursor to start of our display block
+        if self.last_lines_count > 0:
+            # Move up to the first line of our block
+            print(f"\033[{self.last_lines_count}F", end='', flush=True)
+        # else: first time, we're already at the right position
 
-        # Clear any extra lines from previous display
-        if self.last_lines_count > num_lines:
-            for _ in range(self.last_lines_count - num_lines):
-                print(f"\n\033[K", end='')
-            print(f"\033[{self.last_lines_count - num_lines}F", end='', flush=True)
+        # Print all lines
+        for i, line in enumerate(output_lines):
+            # Truncate to terminal width to prevent wrapping
+            if len(line) > term_width - 1:
+                line = line[:term_width - 4] + "..."
+            # Clear line and print content
+            print(f"\033[K{line}", flush=True)
 
         self.last_lines_count = num_lines
 
     def finish(self):
-        """Finish display and move to new line."""
-        print()
+        """Finish display - clear the progress lines."""
+        if self.last_lines_count > 0:
+            # Move cursor up to the start of our display block
+            print(f"\033[{self.last_lines_count}F", end='', flush=True)
+            # Clear all the lines we used
+            for _ in range(self.last_lines_count):
+                print("\033[K", end='')  # Clear line
+                print("\033[1B", end='')  # Move down one line
+            # Move back up so next print starts at the right place
+            print(f"\033[{self.last_lines_count}F", end='', flush=True)
+        self.last_lines_count = 0

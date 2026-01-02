@@ -2286,14 +2286,15 @@ class PackageDatabase:
         Returns:
             Cache file ID
         """
-        now = int(time.time())
-        cursor = self.conn.execute("""
-            INSERT OR REPLACE INTO cache_files
-            (filename, media_id, file_path, file_size, added_time, last_accessed, is_referenced)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-        """, (filename, media_id, file_path, file_size, now, now))
-        self.conn.commit()
-        return cursor.lastrowid
+        with self._lock:
+            now = int(time.time())
+            cursor = self.conn.execute("""
+                INSERT OR REPLACE INTO cache_files
+                (filename, media_id, file_path, file_size, added_time, last_accessed, is_referenced)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+            """, (filename, media_id, file_path, file_size, now, now))
+            self.conn.commit()
+            return cursor.lastrowid
 
     def get_cache_file(self, filename: str, media_id: int = None) -> Optional[Dict]:
         """Get cache file info by filename."""
