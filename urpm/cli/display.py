@@ -260,3 +260,153 @@ def format_dict_as_json(data: Dict[str, Any]) -> str:
 def print_json(data: Any) -> None:
     """Print data as JSON."""
     print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def format_size(size_bytes: float) -> str:
+    """Format bytes as human-readable size."""
+    if size_bytes < 1024:
+        return f"{size_bytes:.0f}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f}MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f}GB"
+
+
+def format_speed(bytes_per_sec: float) -> str:
+    """Format speed as human-readable."""
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.0f}B/s"
+    elif bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.1f}KB/s"
+    else:
+        return f"{bytes_per_sec / (1024 * 1024):.1f}MB/s"
+
+
+class DownloadProgressDisplay:
+    """Handles multi-line download progress display with proper terminal control.
+
+    Displays parallel downloads in a clean, aligned format:
+      [12/14] 14% 12.3MB/s
+              #1 neovim-data [██░░░░░░░░░░░░░░░░░░] 0.4/4.3MB (belnet)
+              #2
+              #3 blablabla   [█████░░░░░░░░░░░░░░░] 0.4/4.3MB (ftp.proxad.net)
+              #4 prout       [███████████░░░░░░░░░] 1.0/1.6MB (peer@192.168.1.5)
+    """
+
+    def __init__(self, num_workers: int = 4, bar_width: int = 20, name_width: int = 20):
+        """Initialize display.
+
+        Args:
+            num_workers: Number of download slots to display
+            bar_width: Width of progress bar in characters
+            name_width: Fixed width for package names (will truncate/pad)
+        """
+        self.num_workers = num_workers
+        self.bar_width = bar_width
+        self.name_width = name_width
+        self.last_lines_count = 0
+
+    def render(self, pkg_num: int, pkg_total: int, bytes_done: int, bytes_total: int,
+               slots_status: List, global_speed: float = 0.0) -> str:
+        """Render the download progress display.
+
+        Args:
+            pkg_num: Current package number (completed)
+            pkg_total: Total packages to download
+            bytes_done: Total bytes downloaded so far
+            bytes_total: Total bytes to download
+            slots_status: List of (slot, DownloadProgress or None) for each worker
+            global_speed: Combined download speed in bytes/sec
+
+        Returns:
+            Multi-line string to display
+        """
+        lines = []
+
+        # Global progress line
+        pct = (bytes_done * 100 // bytes_total) if bytes_total > 0 else 0
+        speed_str = format_speed(global_speed) if global_speed > 0 else ""
+        header = f"  [{pkg_num}/{pkg_total}] {pct}%"
+        if speed_str:
+            header += f" {speed_str}"
+        lines.append(header)
+
+        # Calculate padding for alignment
+        # Header is like "  [12/14] 14%" - we want slots to align after it
+        header_padding = " " * 14  # Approximate alignment
+
+        # Worker slots
+        for slot, progress in slots_status:
+            slot_num = f"#{slot + 1}"
+
+            if progress is None:
+                # Empty slot
+                lines.append(f"{header_padding}{slot_num}")
+            else:
+                # Active download
+                name = progress.name
+                if len(name) > self.name_width:
+                    name = name[:self.name_width - 1] + "…"
+                name = name.ljust(self.name_width)
+
+                # Progress bar
+                if progress.bytes_total > 0:
+                    filled = progress.bytes_done * self.bar_width // progress.bytes_total
+                    bar = '█' * filled + '░' * (self.bar_width - filled)
+
+                    # Size info
+                    done_str = format_size(progress.bytes_done)
+                    total_str = format_size(progress.bytes_total)
+                    size_info = f"{done_str}/{total_str}"
+
+                    # Source (shortened)
+                    source = progress.source
+                    if len(source) > 20:
+                        source = source[:17] + "..."
+
+                    line = f"{header_padding}{slot_num} {name} [{bar}] {size_info} ({source})"
+                else:
+                    line = f"{header_padding}{slot_num} {name} (starting...)"
+
+                lines.append(line)
+
+        return "\n".join(lines)
+
+    def update(self, pkg_num: int, pkg_total: int, bytes_done: int, bytes_total: int,
+               slots_status: List, global_speed: float = 0.0):
+        """Update the display in-place.
+
+        Args:
+            Same as render()
+        """
+        # Move cursor to start of our display block
+        if self.last_lines_count > 1:
+            print(f"\033[{self.last_lines_count - 1}F", end='')
+        elif self.last_lines_count == 1:
+            print(f"\r", end='')
+
+        # Render and print
+        output = self.render(pkg_num, pkg_total, bytes_done, bytes_total,
+                            slots_status, global_speed)
+        output_lines = output.split('\n')
+        num_lines = len(output_lines)
+
+        for i, line in enumerate(output_lines):
+            if i < num_lines - 1:
+                print(f"\033[K{line}")
+            else:
+                print(f"\033[K{line}", end='', flush=True)
+
+        # Clear any extra lines from previous display
+        if self.last_lines_count > num_lines:
+            for _ in range(self.last_lines_count - num_lines):
+                print(f"\n\033[K", end='')
+            print(f"\033[{self.last_lines_count - num_lines}F", end='', flush=True)
+
+        self.last_lines_count = num_lines
+
+    def finish(self):
+        """Finish display and move to new line."""
+        print()

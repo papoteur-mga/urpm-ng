@@ -3914,45 +3914,23 @@ def cmd_mirror_sync(args, db: PackageDatabase) -> int:
     # Use parallel downloader (same as urpm i/u)
     downloader = Downloader(use_peers=False, db=db)
 
-    # Multi-line progress display (exact copy from urpm i)
-    last_lines_count = [0]
+    # Multi-line progress display using DownloadProgressDisplay
+    from . import display
+    progress_display = display.DownloadProgressDisplay(num_workers=4)
 
     def progress(name, pkg_num, pkg_total, bytes_done, bytes_total,
-                 item_bytes=None, item_total=None, active_downloads=None):
-        pct = (bytes_done * 100 // bytes_total) if bytes_total > 0 else 0
+                 item_bytes=None, item_total=None, slots_status=None):
+        # Calculate global speed from all active downloads
+        global_speed = 0.0
+        if slots_status:
+            for slot, prog in slots_status:
+                if prog is not None:
+                    global_speed += prog.get_speed()
 
-        if last_lines_count[0] > 1:
-            print(f"\033[{last_lines_count[0] - 1}F", end='')
-        elif last_lines_count[0] == 1:
-            print(f"\r", end='')
-
-        if active_downloads and len(active_downloads) > 0:
-            num_lines = len(active_downloads)
-            for i, (slot, dl_name, dl_bytes, dl_total) in enumerate(active_downloads):
-                if dl_total and dl_total > 0:
-                    bar_width = 20
-                    filled = dl_bytes * bar_width // dl_total
-                    bar = '█' * filled + '░' * (bar_width - filled)
-                    dl_mb = dl_bytes / (1024 * 1024)
-                    total_mb = dl_total / (1024 * 1024)
-                    line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name} [{bar}] {dl_mb:.1f}/{total_mb:.1f}MB"
-                else:
-                    line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name}"
-
-                if i < num_lines - 1:
-                    print(f"\033[K{line}")
-                else:
-                    print(f"\033[K{line}", end='', flush=True)
-
-            if last_lines_count[0] > num_lines:
-                for _ in range(last_lines_count[0] - num_lines):
-                    print(f"\n\033[K", end='')
-                print(f"\033[{last_lines_count[0] - num_lines}F", end='', flush=True)
-
-            last_lines_count[0] = num_lines
-        else:
-            print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name}...", end='', flush=True)
-            last_lines_count[0] = 1
+        progress_display.update(
+            pkg_num, pkg_total, bytes_done, bytes_total,
+            slots_status or [], global_speed
+        )
 
     # Suppress logging during download to avoid polluting progress display
     import logging
@@ -3963,12 +3941,7 @@ def cmd_mirror_sync(args, db: PackageDatabase) -> int:
     # Restore logging
     logging.getLogger('urpm.core.download').setLevel(logging.WARNING)
 
-    # Clear progress lines
-    if last_lines_count[0] > 1:
-        for _ in range(last_lines_count[0] - 1):
-            print(f"\n\033[K", end='')
-        print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
-    print()
+    progress_display.finish()
 
     # Summary
     failed = [r for r in dl_results if not r.success]
@@ -5178,76 +5151,26 @@ def cmd_install(args, db: PackageDatabase) -> int:
         use_peers = not getattr(args, 'no_peers', False)
         downloader = Downloader(use_peers=use_peers, db=db)
 
-        last_lines_count = [0]  # Track how many lines we displayed last time
+        # Multi-line progress display using DownloadProgressDisplay
+        from . import display
+        progress_display = display.DownloadProgressDisplay(num_workers=4)
 
         def progress(name, pkg_num, pkg_total, bytes_done, bytes_total,
-                     item_bytes=None, item_total=None, active_downloads=None):
-            pct = (bytes_done * 100 // bytes_total) if bytes_total > 0 else 0
+                     item_bytes=None, item_total=None, slots_status=None):
+            # Calculate global speed from all active downloads
+            global_speed = 0.0
+            if slots_status:
+                for slot, prog in slots_status:
+                    if prog is not None:
+                        global_speed += prog.get_speed()
 
-            # Move cursor to start of our display block
-            # \033[F = CPL (Cursor Previous Line) - moves up AND to column 0
-            if last_lines_count[0] > 1:
-                # Move up (N-1) lines to get to the first line
-                print(f"\033[{last_lines_count[0] - 1}F", end='')
-            elif last_lines_count[0] == 1:
-                # Just go to beginning of current line
-                print(f"\r", end='')
-
-            # Show all active downloads if available
-            # Format: (slot, name, bytes_done, bytes_total) sorted by slot
-            if active_downloads and len(active_downloads) > 0:
-                num_lines = len(active_downloads)
-                for i, (slot, dl_name, dl_bytes, dl_total) in enumerate(active_downloads):
-                    if dl_total and dl_total > 0:
-                        bar_width = 20
-                        filled = dl_bytes * bar_width // dl_total
-                        bar = '█' * filled + '░' * (bar_width - filled)
-                        dl_mb = dl_bytes / (1024 * 1024)
-                        total_mb = dl_total / (1024 * 1024)
-                        line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name} [{bar}] {dl_mb:.1f}/{total_mb:.1f}MB"
-                    else:
-                        line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name}"
-
-                    # Clear line and print content
-                    if i < num_lines - 1:
-                        print(f"\033[K{line}")  # with newline
-                    else:
-                        print(f"\033[K{line}", end='', flush=True)  # last line, no newline
-
-                # Clear any extra lines from previous display
-                if last_lines_count[0] > num_lines:
-                    for _ in range(last_lines_count[0] - num_lines):
-                        print(f"\n\033[K", end='')
-                    # Move back up to end of our content
-                    print(f"\033[{last_lines_count[0] - num_lines}F", end='', flush=True)
-
-                last_lines_count[0] = num_lines
-            elif item_bytes is not None and item_total and item_total > 0:
-                # Single download with progress
-                bar_width = 20
-                filled = item_bytes * bar_width // item_total
-                bar = '█' * filled + '░' * (bar_width - filled)
-                item_mb = item_bytes / (1024 * 1024)
-                total_mb = item_total / (1024 * 1024)
-                print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name} [{bar}] {item_mb:.1f}/{total_mb:.1f}MB", end='', flush=True)
-                # Clear extra lines if we went from multi to single
-                if last_lines_count[0] > 1:
-                    for _ in range(last_lines_count[0] - 1):
-                        print(f"\n\033[K", end='')
-                    print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
-                last_lines_count[0] = 1
-            else:
-                # No active downloads - just show package name
-                print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name}", end='', flush=True)
-                if last_lines_count[0] > 1:
-                    for _ in range(last_lines_count[0] - 1):
-                        print(f"\n\033[K", end='')
-                    print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
-                last_lines_count[0] = 1
+            progress_display.update(
+                pkg_num, pkg_total, bytes_done, bytes_total,
+                slots_status or [], global_speed
+            )
 
         dl_results, downloaded, cached, peer_stats = downloader.download_all(download_items, progress)
-        # Final newline after progress
-        print()
+        progress_display.finish()
 
         # Check for failures
         failed = [r for r in dl_results if not r.success]
@@ -5930,66 +5853,26 @@ def cmd_update(args, db: PackageDatabase) -> int:
         use_peers = not getattr(args, 'no_peers', False)
         downloader = Downloader(use_peers=use_peers, db=db)
 
-        last_lines_count = [0]
+        # Multi-line progress display using DownloadProgressDisplay
+        from . import display
+        progress_display = display.DownloadProgressDisplay(num_workers=4)
 
         def progress(name, pkg_num, pkg_total, bytes_done, bytes_total,
-                     item_bytes=None, item_total=None, active_downloads=None):
-            pct = (bytes_done * 100 // bytes_total) if bytes_total > 0 else 0
+                     item_bytes=None, item_total=None, slots_status=None):
+            # Calculate global speed from all active downloads
+            global_speed = 0.0
+            if slots_status:
+                for slot, prog in slots_status:
+                    if prog is not None:
+                        global_speed += prog.get_speed()
 
-            # Move cursor to start of our display block
-            if last_lines_count[0] > 1:
-                print(f"\033[{last_lines_count[0] - 1}F", end='')
-            elif last_lines_count[0] == 1:
-                print(f"\r", end='')
-
-            # Show all active downloads if available
-            # Format: (slot, name, bytes_done, bytes_total) sorted by slot
-            if active_downloads and len(active_downloads) > 0:
-                num_lines = len(active_downloads)
-                for i, (slot, dl_name, dl_bytes, dl_total) in enumerate(active_downloads):
-                    if dl_total and dl_total > 0:
-                        bar_width = 20
-                        filled = dl_bytes * bar_width // dl_total
-                        bar = '█' * filled + '░' * (bar_width - filled)
-                        dl_mb = dl_bytes / (1024 * 1024)
-                        total_mb = dl_total / (1024 * 1024)
-                        line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name} [{bar}] {dl_mb:.1f}/{total_mb:.1f}MB"
-                    else:
-                        line = f"  [{pkg_num}/{pkg_total}] {pct}% #{slot+1} {dl_name}"
-
-                    if i < num_lines - 1:
-                        print(f"\033[K{line}")
-                    else:
-                        print(f"\033[K{line}", end='', flush=True)
-
-                if last_lines_count[0] > num_lines:
-                    for _ in range(last_lines_count[0] - num_lines):
-                        print(f"\n\033[K", end='')
-                    print(f"\033[{last_lines_count[0] - num_lines}F", end='', flush=True)
-
-                last_lines_count[0] = num_lines
-            elif item_bytes is not None and item_total and item_total > 0:
-                bar_width = 20
-                filled = item_bytes * bar_width // item_total
-                bar = '█' * filled + '░' * (bar_width - filled)
-                item_mb = item_bytes / (1024 * 1024)
-                total_mb = item_total / (1024 * 1024)
-                print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name} [{bar}] {item_mb:.1f}/{total_mb:.1f}MB", end='', flush=True)
-                if last_lines_count[0] > 1:
-                    for _ in range(last_lines_count[0] - 1):
-                        print(f"\n\033[K", end='')
-                    print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
-                last_lines_count[0] = 1
-            else:
-                print(f"\033[K  [{pkg_num}/{pkg_total}] {pct}% - {name}", end='', flush=True)
-                if last_lines_count[0] > 1:
-                    for _ in range(last_lines_count[0] - 1):
-                        print(f"\n\033[K", end='')
-                    print(f"\033[{last_lines_count[0] - 1}F", end='', flush=True)
-                last_lines_count[0] = 1
+            progress_display.update(
+                pkg_num, pkg_total, bytes_done, bytes_total,
+                slots_status or [], global_speed
+            )
 
         dl_results, downloaded, cached, peer_stats = downloader.download_all(download_items, progress)
-        print()
+        progress_display.finish()
 
         # Check failures
         failed = [r for r in dl_results if not r.success]

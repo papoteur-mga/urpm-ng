@@ -516,6 +516,8 @@ class TransactionQueue:
         current = [0]
         closed_count = [0]  # Track closed packages
         seen_paths = set()  # Track already-counted packages
+        parent_released_early = [False]  # Track if we released parent optimistically
+        extraction_error = [False]  # Track CPIO/extraction errors
 
         def callback(reason, amount, total_pkg, key, client_data):
             if reason == rpm.RPMCALLBACK_INST_OPEN_FILE:
@@ -541,6 +543,11 @@ class TransactionQueue:
                 open_fds[path] = fd
                 return fd
 
+            elif reason == rpm.RPMCALLBACK_CPIO_ERROR:
+                # Extraction error (checksum, corruption, etc.)
+                extraction_error[0] = True
+                _log_background(f"CPIO extraction error: {key}")
+
             elif reason == rpm.RPMCALLBACK_INST_CLOSE_FILE:
                 path = key
                 if path in open_fds:
@@ -552,8 +559,25 @@ class TransactionQueue:
 
                 # Track closed packages
                 closed_count[0] += 1
-                # Note: Don't send op_done here - wait for ts.run() to complete
-                # because the transaction can still fail (e.g., payload checksum errors)
+
+                # Release parent early when all packages are closed AND no errors seen
+                # ts.run() will continue in background for rpmdb sync/scriptlets
+                # If errors occur later, we'll alert on stderr
+                if (closed_count[0] == total and release_parent_after
+                        and not extraction_error[0] and not pipe_state['closed']):
+                    pipe_state['file'].write(QueueProgressMessage(
+                        msg_type='op_done',
+                        operation_id=op.operation_id,
+                        count=total
+                    ).to_json() + "\n")
+                    pipe_state['file'].write(QueueProgressMessage(
+                        msg_type='parent_can_exit'
+                    ).to_json() + "\n")
+                    pipe_state['file'].flush()
+                    pipe_state['file'].close()
+                    pipe_state['closed'] = True
+                    parent_released_early[0] = True
+                    _log_background("Parent released early (optimistic)")
 
             elif reason == rpm.RPMCALLBACK_TRANS_STOP:
                 _log_background(f"Install complete: {total} packages")
@@ -584,12 +608,29 @@ class TransactionQueue:
         if problems:
             _log_background(f"Transaction failed: {problems}")
             errors = [str(p) for p in problems]
+
+            # If parent was already released (optimistic), alert on stderr
+            if parent_released_early[0]:
+                import sys
+                print("\n" + "=" * 60, file=sys.stderr)
+                print("⚠️  ALERTE URPM: Échec d'installation détecté!", file=sys.stderr)
+                print("=" * 60, file=sys.stderr)
+                for err in errors:
+                    print(f"  ✗ {err}", file=sys.stderr)
+                print("\nLes paquets concernés n'ont PAS été installés.", file=sys.stderr)
+                print("Relancez l'installation après vérification.", file=sys.stderr)
+                print("=" * 60 + "\n", file=sys.stderr)
+                sys.stderr.flush()
+                _log_background("ALERT: Installation failed after parent was released!")
+                # Return success=True because parent already got op_done
+                # The alert on stderr is the notification
+                return True, current[0], []
+
             return False, current[0], errors
 
         _log_background(f"Transaction completed: {total} packages")
 
-        # Release parent after successful install (before rpmdb sync completes)
-        # This allows fire-and-forget behavior while still reporting accurate results
+        # If parent wasn't released early (e.g., extraction error seen), release now
         if release_parent_after and not pipe_state['closed']:
             pipe_state['file'].write(QueueProgressMessage(
                 msg_type='op_done',
@@ -602,7 +643,7 @@ class TransactionQueue:
             pipe_state['file'].flush()
             pipe_state['file'].close()
             pipe_state['closed'] = True
-            _log_background("Parent released after successful install")
+            _log_background("Parent released after transaction complete")
 
         return True, total, []
 

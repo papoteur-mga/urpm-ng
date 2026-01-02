@@ -150,6 +150,42 @@ class PeerAvailability:
         return [(p, path) for p, path in peers if (p.host, p.port) not in exclude]
 
 
+@dataclass
+class DownloadProgress:
+    """Real-time progress for an active download.
+
+    Used for display and server performance tracking.
+    """
+    name: str
+    bytes_done: int
+    bytes_total: int
+    source: str            # Server name or "peer@host"
+    source_type: str       # 'server', 'peer', 'cache'
+    start_time: float      # time.time() when download started
+    samples: List[Tuple[float, int]] = field(default_factory=list)  # [(time, bytes), ...]
+
+    def add_sample(self, bytes_done: int):
+        """Add a progress sample for speed calculation."""
+        import time as _time
+        now = _time.time()
+        self.bytes_done = bytes_done
+        # Keep only last 10 samples for rolling average
+        self.samples.append((now, bytes_done))
+        if len(self.samples) > 10:
+            self.samples.pop(0)
+
+    def get_speed(self) -> float:
+        """Calculate current download speed in bytes/sec."""
+        if len(self.samples) < 2:
+            return 0.0
+        oldest_time, oldest_bytes = self.samples[0]
+        newest_time, newest_bytes = self.samples[-1]
+        elapsed = newest_time - oldest_time
+        if elapsed <= 0:
+            return 0.0
+        return (newest_bytes - oldest_bytes) / elapsed
+
+
 class DownloadCoordinator:
     """Coordinates parallel downloads with queue-based architecture.
 
@@ -188,7 +224,7 @@ class DownloadCoordinator:
         # Real-time download progress tracking (thread-safe)
         # Each worker has a fixed slot (0 to max_workers-1) for stable display
         self._current_progress_lock = threading.Lock()
-        self._current_downloads: Dict[int, Tuple[str, int, int]] = {}  # slot -> (name, bytes_done, bytes_total)
+        self._current_downloads: Dict[int, DownloadProgress] = {}  # slot -> DownloadProgress
 
     def is_peer_failed(self, peer: Peer) -> bool:
         """Check if peer has failed (thread-safe)."""
@@ -226,27 +262,54 @@ class DownloadCoordinator:
         )
         return alternatives[0] if alternatives else None
 
-    def update_download_progress(self, slot: int, item_name: str, bytes_done: int, bytes_total: int):
+    def start_download(self, slot: int, item_name: str, bytes_total: int,
+                        source: str, source_type: str):
+        """Start tracking a new download for a worker slot (thread-safe)."""
+        import time as _time
+        with self._current_progress_lock:
+            self._current_downloads[slot] = DownloadProgress(
+                name=item_name,
+                bytes_done=0,
+                bytes_total=bytes_total,
+                source=source,
+                source_type=source_type,
+                start_time=_time.time(),
+                samples=[]
+            )
+
+    def update_download_progress(self, slot: int, bytes_done: int):
         """Update real-time download progress for a worker slot (thread-safe)."""
         with self._current_progress_lock:
-            self._current_downloads[slot] = (item_name, bytes_done, bytes_total)
+            if slot in self._current_downloads:
+                self._current_downloads[slot].add_sample(bytes_done)
 
-    def clear_download_progress(self, slot: int):
-        """Clear download progress when item completes (thread-safe)."""
+    def clear_download_progress(self, slot: int) -> Optional[DownloadProgress]:
+        """Clear download progress when item completes (thread-safe).
+
+        Returns the final DownloadProgress for stats collection.
+        """
         with self._current_progress_lock:
-            self._current_downloads.pop(slot, None)
+            return self._current_downloads.pop(slot, None)
 
-    def get_all_active_downloads(self) -> List[Tuple[int, str, int, int]]:
+    def get_all_active_downloads(self) -> List[Tuple[int, DownloadProgress]]:
         """Get all active downloads progress (thread-safe).
 
-        Returns list of (slot, name, bytes_done, bytes_total) sorted by slot number.
+        Returns list of (slot, DownloadProgress) sorted by slot number.
         """
         with self._current_progress_lock:
             if not self._current_downloads:
                 return []
             # Sort by slot number for stable display order
-            return [(slot, name, done, total)
-                    for slot, (name, done, total) in sorted(self._current_downloads.items())]
+            return [(slot, prog) for slot, prog in sorted(self._current_downloads.items())]
+
+    def get_all_slots_status(self) -> List[Tuple[int, Optional[DownloadProgress]]]:
+        """Get status of all worker slots (thread-safe).
+
+        Returns list of (slot, DownloadProgress or None) for all slots.
+        """
+        with self._current_progress_lock:
+            return [(slot, self._current_downloads.get(slot))
+                    for slot in range(self.max_workers)]
 
     def _worker(self, slot: int):
         """Worker thread: dequeue, download, report, repeat.
@@ -310,7 +373,7 @@ class DownloadCoordinator:
 
         # Create progress callback for real-time tracking
         def progress_cb(bytes_done: int, bytes_total: int):
-            self.update_download_progress(slot, item.name, bytes_done, bytes_total)
+            self.update_download_progress(slot, bytes_done)
 
         try:
             # Try peer download if assigned
@@ -332,6 +395,9 @@ class DownloadCoordinator:
                         peer = None
 
                 if peer:
+                    # Start tracking with peer source
+                    self.start_download(slot, item.name, item.size or 0,
+                                        f"peer@{peer.host}", 'peer')
                     result = self.downloader.download_from_peer(item, peer, peer_path, progress_callback=progress_cb)
 
                     if result.success:
@@ -347,6 +413,9 @@ class DownloadCoordinator:
                     if alt:
                         alt_peer, alt_path = alt
                         logger.debug(f"Retrying {item.filename} with alternative peer {alt_peer.host}")
+                        # Update tracking with new peer
+                        self.start_download(slot, item.name, item.size or 0,
+                                            f"peer@{alt_peer.host}", 'peer')
                         result = self.downloader.download_from_peer(item, alt_peer, alt_path, progress_callback=progress_cb)
                         if result.success:
                             result.from_peer = True
@@ -354,8 +423,13 @@ class DownloadCoordinator:
                         if result.blacklist_peer:
                             self.mark_peer_failed(alt_peer, result.blacklist_peer.reason)
 
-            # Fall back to upstream
-            result = self.downloader.download_one(item, progress_callback=progress_cb, worker_slot=slot)
+            # Fall back to upstream - source will be set by download_one via callback
+            result = self.downloader.download_one(
+                item, progress_callback=progress_cb, worker_slot=slot,
+                start_callback=lambda source: self.start_download(
+                    slot, item.name, item.size or 0, source, 'server'
+                )
+            )
             result.from_peer = False
             return result
         finally:
@@ -425,22 +499,22 @@ class DownloadCoordinator:
                     completed_bytes += result.item.size
 
                 if progress_callback:
-                    # Get remaining active downloads to show consistent multi-line display
-                    active_downloads = self.get_all_active_downloads()
+                    # Get all slots status for consistent multi-line display
+                    slots_status = self.get_all_slots_status()
+                    active_downloads = [(s, p) for s, p in slots_status if p is not None]
                     if active_downloads:
-                        # Format: (slot, name, bytes_done, bytes_total)
-                        partial_bytes = sum(item[2] for item in active_downloads)
+                        partial_bytes = sum(p.bytes_done for _, p in active_downloads)
                         current_bytes = completed_bytes + partial_bytes
-                        _slot, name, item_bytes, item_total = active_downloads[0]
+                        _, first_prog = active_downloads[0]
                         progress_callback(
-                            name,
+                            first_prog.name,
                             len(results),
                             total_items,
                             current_bytes,
                             total_bytes,
-                            item_bytes,
-                            item_total,
-                            active_downloads
+                            first_prog.bytes_done,
+                            first_prog.bytes_total,
+                            slots_status  # Pass all slots (active and inactive)
                         )
                     else:
                         # No more active downloads - just show completion
@@ -461,25 +535,24 @@ class DownloadCoordinator:
 
                 # Report real-time progress for all active downloads
                 if progress_callback:
-                    active_downloads = self.get_all_active_downloads()
+                    slots_status = self.get_all_slots_status()
+                    active_downloads = [(s, p) for s, p in slots_status if p is not None]
                     if active_downloads:
                         # Calculate real-time total including all partial downloads
-                        # Format: (slot, name, bytes_done, bytes_total)
-                        partial_bytes = sum(item[2] for item in active_downloads)
+                        partial_bytes = sum(p.bytes_done for _, p in active_downloads)
                         current_bytes = completed_bytes + partial_bytes
-                        # Use first for backward compat, pass all as extra
-                        _slot, name, item_bytes, item_total = active_downloads[0]
+                        _, first_prog = active_downloads[0]
                         progress_callback(
-                            name,
+                            first_prog.name,
                             len(results),
                             total_items,
                             current_bytes,
                             total_bytes,
-                            item_bytes,  # Extra: item bytes downloaded
-                            item_total,  # Extra: item total bytes
-                            active_downloads  # Extra: all active downloads
+                            first_prog.bytes_done,
+                            first_prog.bytes_total,
+                            slots_status  # Pass all slots (active and inactive)
                         )
-                        last_active_name = name
+                        last_active_name = first_prog.name
                     else:
                         # No active downloads but still working - show overall progress
                         # Use last_active_name or a generic message
@@ -688,7 +761,8 @@ class Downloader:
                      progress_callback: Callable[[int, int], None] = None,
                      timeout: int = 30,
                      max_retries: int = 3,
-                     worker_slot: int = 0) -> DownloadResult:
+                     worker_slot: int = 0,
+                     start_callback: Callable[[str], None] = None) -> DownloadResult:
         """Download a single package with multi-server failover.
 
         For new schema: tries each server in priority order with retries.
@@ -703,6 +777,7 @@ class Downloader:
                          Workers are distributed across servers (slot 0,1 -> server 0 first,
                          slot 2,3 -> server 1 first, etc.) to avoid all workers hitting
                          the same server simultaneously.
+            start_callback: Optional callback(source_name) called when starting download
 
         Returns:
             DownloadResult with status
@@ -743,6 +818,10 @@ class Downloader:
                 ip_mode = server.get('ip_mode', 'auto')
                 logger.debug(f"Trying server {server['name']} (ip_mode={ip_mode}): {url}")
 
+                # Notify about source before starting
+                if start_callback:
+                    start_callback(server['name'])
+
                 # Try this server with retries
                 for attempt in range(max_retries):
                     success, error = self._download_from_url(
@@ -782,6 +861,17 @@ class Downloader:
                 success=False,
                 error="No download URL available"
             )
+
+        # Extract hostname from URL for source tracking
+        try:
+            from urllib.parse import urlparse
+            source_name = urlparse(item.url).netloc or item.url
+        except Exception:
+            source_name = item.url
+
+        # Notify about source before starting
+        if start_callback:
+            start_callback(source_name)
 
         # Legacy schema: default to ipv4 to avoid IPv6 timeout issues
         last_error = None
