@@ -68,7 +68,7 @@ Note : the following commands need to be in urpm-ng directory.
 
 ### 3. Configure media
 
-Import from existing urpmi config, as root:
+Import from existing urpmi config:
 ```bash
 $ su -c './bin/urpm media import'
 
@@ -81,26 +81,33 @@ V=$(grep VERSION_ID /etc/os-release | cut -d= -f2)
 
 A=$(uname -m)
 
-$ su -c './bin/urpm media add https://mirrors.kernel.org/mageia/distrib/$V/$A/media/core/release/'
+$ su -c "./bin/urpm media add https://mirrors.kernel.org/mageia/distrib/$V/$A/media/core/release/"
 
-$ su -c './bin/urpm media add https://mirrors.kernel.org/mageia/distrib/$V/$A/media/core/updates/'
+$ su -c "./bin/urpm media add https://mirrors.kernel.org/mageia/distrib/$V/$A/media/core/updates/"
 ```
 
-### 4. Open firewall ports
+### 4. Auto configure servers
 
-For P2P package sharing:
+Let urpm add more mirrors to parallelize:
+```bash
+$ su -c './bin/urpm server autoconfig'
+```
+
+### 5. Open firewall ports
+
+For P2P package sharing, use Shorewall rule or drak firewall GUI:
 ```
 TCP 9876   # urpmd HTTP API
 UDP 9878   # Peer discovery
 ```
 
-### 5. Start the daemon
+### 6. Start the daemon
 
 ```bash
 $ su -c './bin/urpmd'
 ```
 
-### 6. Use urpm
+### 7. Use urpm
 
 ```bash
 $ su -c './bin/urpm search firefox'
