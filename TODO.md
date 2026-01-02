@@ -128,6 +128,11 @@
 ### Idle detection
 - [ ] Fix: reset `_last_net_sample` après batch de downloads (évite pause sur propre trafic)
 
+### Download stats & priorités serveurs
+- [ ] Afficher stats par serveur/peer à la fin (volume, paquets, débit moyen)
+- [ ] Tracker les performances des serveurs sur la durée
+- [ ] Prioriser dynamiquement les serveurs les plus rapides
+
 ### Explications upgrade/remove
 - [ ] Expliquer POURQUOI un paquet est supprimé (comme urpmi: "en raison du manque de...")
 - [ ] Tracer les chaînes de dépendances pendant la résolution
