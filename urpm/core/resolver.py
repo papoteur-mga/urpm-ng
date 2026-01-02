@@ -1659,10 +1659,32 @@ class Resolver:
                     problems=[f"Package not found: {n}" for n in not_found]
                 )
         else:
-            # Upgrade all installed packages using UPDATE (not DISTUPGRADE)
-            # UPDATE is more conservative - only upgrades existing packages
-            # DISTUPGRADE was too aggressive and pulled in recommended packages
-            jobs.append(self.pool.Job(solv.Job.SOLVER_UPDATE | solv.Job.SOLVER_SOLVABLE_ALL, 0))
+            # Find installed packages that have updates available
+            # and create SOLVER_INSTALL jobs for the newer versions
+            updates_found = 0
+            for installed_pkg in self.pool.installed.solvables:
+                # Find the best available version of this package
+                sel = self.pool.select(installed_pkg.name, solv.Selection.SELECTION_NAME)
+                best_available = None
+                for s in sel.solvables():
+                    if s.repo != self.pool.installed:
+                        if best_available is None or s.evrcmp(best_available) > 0:
+                            best_available = s
+
+                # If there's a newer version available, add an install job for it
+                if best_available and best_available.evrcmp(installed_pkg) > 0:
+                    jobs.append(self.pool.Job(
+                        solv.Job.SOLVER_INSTALL | solv.Job.SOLVER_SOLVABLE,
+                        best_available.id
+                    ))
+                    updates_found += 1
+
+            if updates_found == 0:
+                return Resolution(
+                    success=True,
+                    actions=[],
+                    problems=[],
+                )
 
         # Solve
         solver = self.pool.Solver()
@@ -1672,6 +1694,8 @@ class Resolver:
         solver.set_flag(solv.Solver.SOLVER_FLAG_FOCUS_INSTALLED, 1)
         # Allow removing packages with broken dependencies
         solver.set_flag(solv.Solver.SOLVER_FLAG_ALLOW_UNINSTALL, 1)
+        # Handle obsoletes during updates (package name changes like lib64gdal37 → lib64gdal38)
+        solver.set_flag(solv.Solver.SOLVER_FLAG_YUM_OBSOLETES, 1)
         # Handle weak dependencies (Recommends/Suggests)
         if not self.install_recommends:
             solver.set_flag(solv.Solver.SOLVER_FLAG_IGNORE_RECOMMENDED, 1)

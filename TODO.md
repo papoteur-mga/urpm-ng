@@ -128,6 +128,10 @@
 ### Idle detection
 - [ ] Fix: reset `_last_net_sample` après batch de downloads (évite pause sur propre trafic)
 
+### Explications upgrade/remove
+- [ ] Expliquer POURQUOI un paquet est supprimé (comme urpmi: "en raison du manque de...")
+- [ ] Tracer les chaînes de dépendances pendant la résolution
+
 ### Refonte why/rdepends
 
 Mutualiser le code et améliorer les deux commandes.

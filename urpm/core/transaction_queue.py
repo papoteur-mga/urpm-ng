@@ -552,24 +552,8 @@ class TransactionQueue:
 
                 # Track closed packages
                 closed_count[0] += 1
-
-                # Release parent after last package is closed (before rpmdb sync)
-                if (release_parent_after and
-                    closed_count[0] >= total and
-                    not pipe_state['closed']):
-                    # Send success message and release parent
-                    pipe_state['file'].write(QueueProgressMessage(
-                        msg_type='op_done',
-                        operation_id=op.operation_id,
-                        count=total
-                    ).to_json() + "\n")
-                    pipe_state['file'].write(QueueProgressMessage(
-                        msg_type='parent_can_exit'
-                    ).to_json() + "\n")
-                    pipe_state['file'].flush()
-                    pipe_state['file'].close()
-                    pipe_state['closed'] = True
-                    _log_background("Parent released after install, continuing with rpmdb sync...")
+                # Note: Don't send op_done here - wait for ts.run() to complete
+                # because the transaction can still fail (e.g., payload checksum errors)
 
             elif reason == rpm.RPMCALLBACK_TRANS_STOP:
                 _log_background(f"Install complete: {total} packages")
@@ -598,8 +582,27 @@ class TransactionQueue:
                 pass
 
         if problems:
+            _log_background(f"Transaction failed: {problems}")
             errors = [str(p) for p in problems]
             return False, current[0], errors
+
+        _log_background(f"Transaction completed: {total} packages")
+
+        # Release parent after successful install (before rpmdb sync completes)
+        # This allows fire-and-forget behavior while still reporting accurate results
+        if release_parent_after and not pipe_state['closed']:
+            pipe_state['file'].write(QueueProgressMessage(
+                msg_type='op_done',
+                operation_id=op.operation_id,
+                count=total
+            ).to_json() + "\n")
+            pipe_state['file'].write(QueueProgressMessage(
+                msg_type='parent_can_exit'
+            ).to_json() + "\n")
+            pipe_state['file'].flush()
+            pipe_state['file'].close()
+            pipe_state['closed'] = True
+            _log_background("Parent released after successful install")
 
         return True, total, []
 

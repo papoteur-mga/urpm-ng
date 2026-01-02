@@ -5809,9 +5809,12 @@ def cmd_update(args, db: PackageDatabase) -> int:
     downgrades = [a for a in result.actions if a.action.value == 'downgrade']
 
     # Find orphaned dependencies (unless --noerase-orphans)
+    # Exclude packages already in removes to avoid duplicates
     orphans = []
     if upgrades and not getattr(args, 'noerase_orphans', False):
-        orphans = resolver.find_upgrade_orphans(upgrades)
+        removes_names = {a.name for a in removes}
+        orphans = [o for o in resolver.find_upgrade_orphans(upgrades)
+                   if o.name not in removes_names]
 
     # Show packages by category
     from . import colors, display
