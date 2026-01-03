@@ -1399,6 +1399,11 @@ Examples:
         action='store_true',
         help='Do not prompt for confirmation'
     )
+    peer_clean.add_argument(
+        '--show-all', '-a',
+        action='store_true',
+        help='Show all files (do not truncate list)'
+    )
 
     return parser
 
@@ -7527,7 +7532,8 @@ def cmd_peer(args, db: PackageDatabase) -> int:
         if not args.yes:
             print(f"\nFiles to delete:")
             from . import display
-            display.print_package_list(existing, max_lines=10)
+            show_all = getattr(args, 'show_all', False)
+            display.print_package_list([str(p) for p in existing], max_lines=10, show_all=show_all)
 
             try:
                 response = input(f"\nDelete {len(existing)} files? [y/N] ")
