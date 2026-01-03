@@ -129,6 +129,7 @@
 - [ ] Afficher stats par serveur/peer à la fin (volume, paquets, débit moyen)
 - [ ] Tracker les performances des serveurs sur la durée
 - [ ] Prioriser dynamiquement les serveurs les plus rapides
+- [ ] Tester IPv4/IPv6 en arrière-plan (pendant downloads prédictifs) et choisir le plus rapide pour dual
 
 ### Explications upgrade/remove
 - [ ] Expliquer POURQUOI un paquet est supprimé (comme urpmi: "en raison du manque de...")
