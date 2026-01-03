@@ -2973,9 +2973,13 @@ def cmd_server_list(args, db: PackageDatabase) -> int:
         print(colors.info("No servers configured"))
         return 0
 
+    # Calculate column widths dynamically (no truncation)
+    name_width = max(4, max(len(srv['name']) for srv in servers))
+    host_width = max(4, max(len(srv['host']) for srv in servers))
+
     # Header
-    print(f"\n{'Name':<25} {'Protocol':<8} {'Host':<30} {'Pri':>4} {'IP':>6} {'Status':<8}")
-    print("-" * 90)
+    print(f"\n{'Name':<{name_width}} {'Protocol':<8} {'Host':<{host_width}} {'Pri':>4} {'IP':>6} {'Status':<8}")
+    print("-" * (name_width + host_width + 35))
 
     for srv in servers:
         status = colors.success("enabled") if srv['enabled'] else colors.dim("disabled")
@@ -2991,9 +2995,7 @@ def cmd_server_list(args, db: PackageDatabase) -> int:
         else:
             ip_str = ip_padded
 
-        name = srv['name'][:24]
-        host = srv['host'][:29]
-        print(f"{name:<25} {srv['protocol']:<8} {host:<30} {srv['priority']:>4} {ip_str} {status}")
+        print(f"{srv['name']:<{name_width}} {srv['protocol']:<8} {srv['host']:<{host_width}} {srv['priority']:>4} {ip_str} {status}")
 
     print()
     return 0
