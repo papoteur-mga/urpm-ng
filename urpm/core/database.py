@@ -1028,6 +1028,15 @@ class PackageDatabase:
         )
         self.conn.commit()
 
+    def update_media_sync_info(self, media_id: int, synthesis_md5: str):
+        """Update media sync timestamp and MD5. Thread-safe."""
+        with self._lock:
+            self.conn.execute("""
+                UPDATE media SET last_sync = ?, synthesis_md5 = ?
+                WHERE id = ?
+            """, (int(time.time()), synthesis_md5, media_id))
+            self.conn.commit()
+
     def get_media_by_id(self, media_id: int) -> Optional[Dict]:
         """Get media info by ID."""
         cursor = self.conn.execute(
@@ -1248,7 +1257,7 @@ class PackageDatabase:
                         batch_size: int = 1000):
         """Import packages from a parsed synthesis or hdlist.
 
-        Uses bulk inserts for performance.
+        Uses bulk inserts for performance. Thread-safe via lock.
 
         Args:
             packages: Iterator of package dictionaries
@@ -1257,6 +1266,15 @@ class PackageDatabase:
             progress_callback: Optional callback(count, pkg_name)
             batch_size: Number of packages per batch
         """
+        with self._lock:
+            return self._import_packages_unlocked(
+                packages, media_id, source, progress_callback, batch_size
+            )
+
+    def _import_packages_unlocked(self, packages: Iterator[Dict], media_id: int = None,
+                                  source: str = 'synthesis', progress_callback=None,
+                                  batch_size: int = 1000):
+        """Internal import implementation (must hold lock)."""
         import os
         import logging
         pkg_logger = logging.getLogger(__name__)

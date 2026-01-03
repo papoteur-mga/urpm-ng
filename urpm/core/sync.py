@@ -318,11 +318,8 @@ def check_media_update_needed(db: PackageDatabase, media_id: int,
             return True, None
 
         # Check against stored MD5
-        media_row = db.conn.execute(
-            "SELECT synthesis_md5 FROM media WHERE id = ?", (media_id,)
-        ).fetchone()
-
-        if media_row and media_row['synthesis_md5'] == synthesis_md5:
+        media_info = db.get_media_by_id(media_id)
+        if media_info and media_info.get('synthesis_md5') == synthesis_md5:
             return False, synthesis_md5  # No update needed
 
         return True, synthesis_md5
@@ -495,13 +492,8 @@ def sync_media(db: PackageDatabase, media_name: str,
         if md5_result.success:
             shutil.copy2(md5sum_path, cache_media_info / "MD5SUM")
 
-        # Update media sync info
-        import time
-        db.conn.execute("""
-            UPDATE media SET last_sync = ?, synthesis_md5 = ?
-            WHERE id = ?
-        """, (int(time.time()), result.md5, media_id))
-        db.conn.commit()
+        # Update media sync info (thread-safe)
+        db.update_media_sync_info(media_id, result.md5)
 
         if progress_callback:
             progress_callback("done", count, count)
@@ -516,31 +508,64 @@ def sync_media(db: PackageDatabase, media_name: str,
 
 def sync_all_media(db: PackageDatabase,
                    progress_callback: Callable[[str, str, int, int], None] = None,
-                   force: bool = False) -> List[Tuple[str, SyncResult]]:
-    """Synchronize all enabled media.
+                   force: bool = False,
+                   max_workers: int = 4) -> List[Tuple[str, SyncResult]]:
+    """Synchronize all enabled media in parallel.
 
     Args:
         db: Database instance
         progress_callback: Optional callback(media_name, stage, current, total)
         force: Force update even if MD5 matches
+        max_workers: Maximum parallel downloads (default: 4)
 
     Returns:
         List of (media_name, SyncResult) tuples
     """
-    results = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     media_list = db.list_media()
+    enabled_media = [m for m in media_list if m['enabled']]
 
-    for media in media_list:
-        if not media['enabled']:
-            continue
+    if not enabled_media:
+        return []
 
-        name = media['name']
+    # Thread-safe progress callback wrapper
+    progress_lock = threading.Lock()
 
-        def media_progress(stage, current, total):
-            if progress_callback:
+    def thread_safe_progress(name, stage, current, total):
+        if progress_callback:
+            with progress_lock:
                 progress_callback(name, stage, current, total)
 
-        result = sync_media(db, name, media_progress, force=force)
-        results.append((name, result))
+    def sync_one(media_name: str) -> Tuple[str, SyncResult]:
+        """Sync a single media (runs in thread)."""
+        def media_progress(stage, current, total):
+            thread_safe_progress(media_name, stage, current, total)
+
+        result = sync_media(db, media_name, media_progress, force=force)
+        return (media_name, result)
+
+    # Use parallel execution
+    results = []
+    num_workers = min(max_workers, len(enabled_media))
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(sync_one, m['name']): m['name']
+            for m in enabled_media
+        }
+
+        for future in as_completed(futures):
+            media_name = futures[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                results.append((media_name, SyncResult(success=False, error=str(e))))
+
+    # Sort by original order
+    name_order = {m['name']: i for i, m in enumerate(enabled_media)}
+    results.sort(key=lambda x: name_order.get(x[0], 999))
 
     return results

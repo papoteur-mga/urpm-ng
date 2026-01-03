@@ -2420,6 +2420,7 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
     """Handle media update command."""
     from . import colors
     from ..core.sync import sync_media, sync_all_media
+    import threading
 
     def progress(media_name, stage, current, total):
         # Clear line with ANSI escape code, then print
@@ -2451,10 +2452,43 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
             print(f"  {colors.error('Error')}: {result.error}")
             return 1
     else:
-        # Update all media
-        print("Updating all media...")
-        results = sync_all_media(db, progress, force=True)
-        print()  # newline after progress
+        # Update all media in parallel
+        print("Updating all media (parallel)...")
+
+        # Track status for each media
+        media_status = {}
+        status_lock = threading.Lock()
+        media_list = [m['name'] for m in db.list_media() if m['enabled']]
+        num_lines = 0
+
+        def parallel_progress(media_name, stage, current, total):
+            nonlocal num_lines
+            with status_lock:
+                # Update status
+                if total > 0:
+                    media_status[media_name] = f"{stage} ({current}/{total})"
+                else:
+                    media_status[media_name] = stage
+
+                # Redraw all status lines
+                if num_lines > 0:
+                    print(f"\033[{num_lines}F", end='', flush=True)
+
+                for name in media_list:
+                    status = media_status.get(name, "waiting...")
+                    print(f"\033[K  {name}: {status}")
+
+                num_lines = len(media_list)
+
+        results = sync_all_media(db, parallel_progress, force=True)
+
+        # Clear progress lines
+        if num_lines > 0:
+            print(f"\033[{num_lines}F", end='', flush=True)
+            for _ in range(num_lines):
+                print("\033[K", end='')
+                print("\033[1B", end='')
+            print(f"\033[{num_lines}F", end='', flush=True)
 
         total_packages = 0
         errors = 0
