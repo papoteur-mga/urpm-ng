@@ -14,9 +14,6 @@
 - [ ] Valider re-résolution après choix utilisateur
 
 
-### Bootstrap
-- [ ] Quand python3-solv ou python3-zstandard manquent, proposer installation via DL direct ou urpmi
-
 ---
 
 ## Phase 1 : Developper & community features
