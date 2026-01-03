@@ -355,17 +355,12 @@ def get_socket_family_for_ip_mode(ip_mode: str) -> int:
         ip_mode: 'auto', 'ipv4', 'ipv6', or 'dual'
 
     Returns:
-        socket.AF_INET, socket.AF_INET6, or 0 (auto)
+        socket.AF_INET or socket.AF_INET6
     """
     import socket
 
-    if ip_mode == 'ipv4':
-        return socket.AF_INET
-    elif ip_mode == 'ipv6':
+    if ip_mode == 'ipv6':
         return socket.AF_INET6
-    elif ip_mode == 'dual':
-        # Prefer IPv4 for dual-stack
-        return socket.AF_INET
     else:
-        # 'auto' - let system decide
-        return 0
+        # 'auto', 'dual', 'ipv4' - prefer IPv4 (faster, more reliable)
+        return socket.AF_INET
