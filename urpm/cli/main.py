@@ -7380,13 +7380,8 @@ def cmd_peer(args, db: PackageDatabase) -> int:
     from . import colors
     from pathlib import Path
 
-    if not args.peer_command:
-        print("Usage: urpm peer <subcommand>")
-        print("Subcommands: list, downloads, blacklist, unblacklist, clean")
-        return 1
-
-    # peer list - show peer stats
-    if args.peer_command in ('list', 'ls'):
+    # peer list - show peer stats (default when no subcommand)
+    if args.peer_command in ('list', 'ls', None):
         # Query daemon for discovered peers
         discovered_peers = _query_daemon_peers()
         stats = db.get_peer_stats()
