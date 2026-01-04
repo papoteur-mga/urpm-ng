@@ -434,7 +434,17 @@ MIGRATIONS = {
 
 
 class PackageDatabase:
-    """SQLite database for package metadata cache."""
+    """SQLite database for package metadata cache.
+
+    Thread-safety: Uses thread-local connections to allow safe concurrent access
+    from multiple threads (e.g., ThreadPoolExecutor in sync_all_media).
+
+    Process-safety: Uses WAL mode and busy_timeout for concurrent access from
+    multiple processes (CLI + urpmd daemon).
+    """
+
+    # Timeout for waiting on locked database (5 seconds)
+    BUSY_TIMEOUT_MS = 5000
 
     def __init__(self, db_path: Optional[Path] = None):
         """Initialize database connection.
@@ -452,15 +462,51 @@ class PackageDatabase:
         # Lock for thread-safe database access (used with ThreadingHTTPServer)
         self._lock = threading.RLock()
 
-        # check_same_thread=False allows sharing connection across threads
-        # We use a lock to serialize write operations
-        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
+        # Thread-local storage for per-thread connections
+        self._local = threading.local()
+
+        # Main thread connection (also stored in _local for consistency)
+        self._main_thread_id = threading.get_ident()
+        self.conn = self._create_connection()
+        self._local.conn = self.conn
 
         self._init_schema()
+
+    def _create_connection(self) -> sqlite3.Connection:
+        """Create a new SQLite connection with proper settings.
+
+        Returns:
+            Configured SQLite connection
+        """
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        # WAL mode for concurrent reads + single writer
+        conn.execute("PRAGMA journal_mode=WAL")
+        # NORMAL sync is safe with WAL (only FULL needed for rollback journal)
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        # Wait up to 5 seconds if database is locked (inter-process safety)
+        conn.execute(f"PRAGMA busy_timeout={self.BUSY_TIMEOUT_MS}")
+        return conn
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get the connection for the current thread.
+
+        Creates a new connection if this thread doesn't have one yet.
+        This enables safe concurrent access from ThreadPoolExecutor.
+
+        Returns:
+            SQLite connection for current thread
+        """
+        # Check if this thread already has a connection
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            return conn
+
+        # Create new connection for this thread
+        conn = self._create_connection()
+        self._local.conn = conn
+        return conn
 
     def _detect_schema_version(self) -> int:
         """Detect schema version from existing tables when schema_info is missing.
@@ -929,8 +975,18 @@ class PackageDatabase:
         self.conn.commit()
 
     def close(self):
-        """Close database connection."""
-        self.conn.close()
+        """Close database connection.
+
+        Note: Thread-local connections are automatically cleaned up when
+        threads end (e.g., when ThreadPoolExecutor workers terminate).
+        """
+        # Close main thread connection
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+        # Clear thread-local reference if in main thread
+        if hasattr(self._local, 'conn'):
+            self._local.conn = None
     
     def __enter__(self):
         return self
@@ -1008,16 +1064,18 @@ class PackageDatabase:
         self.conn.commit()
     
     def get_media(self, name: str) -> Optional[Dict]:
-        """Get media info by name."""
-        cursor = self.conn.execute(
+        """Get media info by name. Thread-safe."""
+        conn = self._get_connection()
+        cursor = conn.execute(
             "SELECT * FROM media WHERE name = ?", (name,)
         )
         row = cursor.fetchone()
         return dict(row) if row else None
-    
+
     def list_media(self) -> List[Dict]:
-        """List all media sources."""
-        cursor = self.conn.execute("SELECT * FROM media ORDER BY priority, name")
+        """List all media sources. Thread-safe."""
+        conn = self._get_connection()
+        cursor = conn.execute("SELECT * FROM media ORDER BY priority, name")
         return [dict(row) for row in cursor]
     
     def enable_media(self, name: str, enabled: bool = True):
@@ -1030,12 +1088,13 @@ class PackageDatabase:
 
     def update_media_sync_info(self, media_id: int, synthesis_md5: str):
         """Update media sync timestamp and MD5. Thread-safe."""
+        conn = self._get_connection()
         with self._lock:
-            self.conn.execute("""
+            conn.execute("""
                 UPDATE media SET last_sync = ?, synthesis_md5 = ?
                 WHERE id = ?
             """, (int(time.time()), synthesis_md5, media_id))
-            self.conn.commit()
+            conn.commit()
 
     def get_media_by_id(self, media_id: int) -> Optional[Dict]:
         """Get media info by ID."""
@@ -1198,7 +1257,7 @@ class PackageDatabase:
 
     def get_servers_for_media(self, media_id: int, enabled_only: bool = True,
                                limit: int = None) -> List[Dict]:
-        """Get all servers that can serve a media, ordered by priority.
+        """Get all servers that can serve a media, ordered by priority. Thread-safe.
 
         Args:
             media_id: Media ID
@@ -1208,6 +1267,7 @@ class PackageDatabase:
         Returns:
             List of server dicts, ordered by priority (descending)
         """
+        conn = self._get_connection()
         query = """
             SELECT s.* FROM server s
             JOIN server_media sm ON s.id = sm.server_id
@@ -1219,12 +1279,13 @@ class PackageDatabase:
         if limit:
             query += f" LIMIT {limit}"
 
-        cursor = self.conn.execute(query, (media_id,))
+        cursor = conn.execute(query, (media_id,))
         return [dict(row) for row in cursor]
 
     def get_media_for_server(self, server_id: int) -> List[Dict]:
-        """Get all media served by a server."""
-        cursor = self.conn.execute("""
+        """Get all media served by a server. Thread-safe."""
+        conn = self._get_connection()
+        cursor = conn.execute("""
             SELECT m.* FROM media m
             JOIN server_media sm ON m.id = sm.media_id
             WHERE sm.server_id = ?
@@ -1257,7 +1318,8 @@ class PackageDatabase:
                         batch_size: int = 1000):
         """Import packages from a parsed synthesis or hdlist.
 
-        Uses bulk inserts for performance. Thread-safe via lock.
+        Uses bulk inserts for performance. Thread-safe via lock and
+        thread-local connections.
 
         Args:
             packages: Iterator of package dictionaries
@@ -1266,15 +1328,21 @@ class PackageDatabase:
             progress_callback: Optional callback(count, pkg_name)
             batch_size: Number of packages per batch
         """
+        conn = self._get_connection()
         with self._lock:
             return self._import_packages_unlocked(
-                packages, media_id, source, progress_callback, batch_size
+                conn, packages, media_id, source, progress_callback, batch_size
             )
 
-    def _import_packages_unlocked(self, packages: Iterator[Dict], media_id: int = None,
+    def _import_packages_unlocked(self, conn: sqlite3.Connection,
+                                  packages: Iterator[Dict], media_id: int = None,
                                   source: str = 'synthesis', progress_callback=None,
                                   batch_size: int = 1000):
-        """Internal import implementation (must hold lock)."""
+        """Internal import implementation (must hold lock).
+
+        Args:
+            conn: SQLite connection to use (thread-local)
+        """
         import os
         import logging
         pkg_logger = logging.getLogger(__name__)
@@ -1290,7 +1358,7 @@ class PackageDatabase:
             progress_callback(0, "preparing...")
 
         # Begin transaction
-        self.conn.execute("BEGIN TRANSACTION")
+        conn.execute("BEGIN TRANSACTION")
 
         try:
             # Step 1: Delete all dependencies for this media (they can change)
@@ -1299,7 +1367,7 @@ class PackageDatabase:
                     progress_callback(0, "clearing dependencies...")
                 for table in ('requires', 'provides', 'conflicts', 'obsoletes',
                               'recommends', 'suggests', 'supplements', 'enhances'):
-                    self.conn.execute(f"""
+                    conn.execute(f"""
                         DELETE FROM {table} WHERE pkg_id IN
                         (SELECT id FROM packages WHERE media_id = ?)
                     """, (media_id,))
@@ -1307,7 +1375,7 @@ class PackageDatabase:
             # Step 2: Find obsolete packages (in DB but not in new synthesis)
             obsolete_packages = []
             if media_id:
-                cursor = self.conn.execute(
+                cursor = conn.execute(
                     "SELECT id, nevra, name, version, release, arch FROM packages WHERE media_id = ?",
                     (media_id,)
                 )
@@ -1340,7 +1408,7 @@ class PackageDatabase:
                 # Delete obsolete packages from DB
                 obsolete_ids = [p['id'] for p in obsolete_packages]
                 placeholders = ','.join('?' * len(obsolete_ids))
-                self.conn.execute(
+                conn.execute(
                     f"DELETE FROM packages WHERE id IN ({placeholders})",
                     obsolete_ids
                 )
@@ -1374,7 +1442,7 @@ class PackageDatabase:
                     timestamp
                 ))
 
-            self.conn.executemany("""
+            conn.executemany("""
                 INSERT INTO packages
                 (media_id, name, epoch, version, release, arch, name_lower, nevra,
                  summary, description, size, group_name, url, license,
@@ -1402,7 +1470,7 @@ class PackageDatabase:
                 progress_callback(total, "indexing deps...")
 
             # Build nevra -> pkg_id mapping
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 "SELECT id, nevra FROM packages WHERE media_id = ?",
                 (media_id,)
             )
@@ -1442,48 +1510,48 @@ class PackageDatabase:
 
             # Bulk insert dependencies
             if requires_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO requires (pkg_id, capability) VALUES (?, ?)",
                     requires_rows
                 )
             if provides_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO provides (pkg_id, capability) VALUES (?, ?)",
                     provides_rows
                 )
             if conflicts_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO conflicts (pkg_id, capability) VALUES (?, ?)",
                     conflicts_rows
                 )
             if obsoletes_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO obsoletes (pkg_id, capability) VALUES (?, ?)",
                     obsoletes_rows
                 )
             # Weak dependencies
             if recommends_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO recommends (pkg_id, capability) VALUES (?, ?)",
                     recommends_rows
                 )
             if suggests_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO suggests (pkg_id, capability) VALUES (?, ?)",
                     suggests_rows
                 )
             if supplements_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO supplements (pkg_id, capability) VALUES (?, ?)",
                     supplements_rows
                 )
             if enhances_rows:
-                self.conn.executemany(
+                conn.executemany(
                     "INSERT INTO enhances (pkg_id, capability) VALUES (?, ?)",
                     enhances_rows
                 )
 
-            self.conn.commit()
+            conn.commit()
 
             if progress_callback:
                 progress_callback(total, "done")
@@ -1491,7 +1559,7 @@ class PackageDatabase:
             return total
 
         except Exception as e:
-            self.conn.rollback()
+            conn.rollback()
             raise e
     
     def clear_media_packages(self, media_id: int):
@@ -2315,14 +2383,15 @@ class PackageDatabase:
             return cursor.lastrowid
 
     def get_cache_file(self, filename: str, media_id: int = None) -> Optional[Dict]:
-        """Get cache file info by filename."""
+        """Get cache file info by filename. Thread-safe."""
+        conn = self._get_connection()
         if media_id:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 "SELECT * FROM cache_files WHERE filename = ? AND media_id = ?",
                 (filename, media_id)
             )
         else:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 "SELECT * FROM cache_files WHERE filename = ?", (filename,)
             )
         row = cursor.fetchone()
@@ -2407,23 +2476,24 @@ class PackageDatabase:
         self.conn.commit()
 
     def delete_cache_file(self, filename: str, media_id: int = None) -> bool:
-        """Delete a cache file record.
+        """Delete a cache file record. Thread-safe.
 
         Note: This only removes the DB record, not the actual file.
 
         Returns:
             True if a record was deleted
         """
+        conn = self._get_connection()
         if media_id:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 "DELETE FROM cache_files WHERE filename = ? AND media_id = ?",
                 (filename, media_id)
             )
         else:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 "DELETE FROM cache_files WHERE filename = ?", (filename,)
             )
-        self.conn.commit()
+        conn.commit()
         return cursor.rowcount > 0
 
     def get_cache_stats(self, media_id: int = None) -> Dict[str, Any]:
