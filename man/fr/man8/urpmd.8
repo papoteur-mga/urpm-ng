@@ -1,0 +1,126 @@
+.\" Page de manuel pour urpmd
+.TH URPMD 8 "Janvier 2025" "urpm-ng" "Administration systeme"
+.SH NOM
+urpmd \- demon urpm pour la gestion intelligente du cache et le partage P2P
+.SH SYNOPSIS
+.B urpmd
+.RI [ options ]
+.SH DESCRIPTION
+.B urpmd
+est le demon d'arriere-plan pour urpm-ng. Il fournit :
+.IP \(bu 2
+Mise en cache intelligente avec telechargements predictifs
+.IP \(bu 2
+Partage de paquets P2P entre machines du reseau local
+.IP \(bu 2
+Serveur HTTP pour servir les paquets aux pairs
+.IP \(bu 2
+Decouverte automatique des pairs via broadcast UDP
+.IP \(bu 2
+Mise a jour des metadonnees en arriere-plan
+.PP
+Le demon est gere via systemd et demarre automatiquement apres l'installation.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Affiche l'aide et quitte.
+.TP
+.BR \-f ", " \-\-foreground
+Execute en avant-plan (ne demonise pas). Utile pour le debogage.
+.TP
+.BR \-p ", " \-\-port " " \fIPORT\fR
+Port du serveur HTTP. Defaut : 9876 (production), 9877 (developpement).
+.TP
+.BR \-H ", " \-\-host " " \fIHOTE\fR
+Adresse d'ecoute du serveur HTTP. Defaut : 0.0.0.0 (toutes les interfaces).
+.TP
+.BR \-v ", " \-\-verbose
+Active la journalisation verbeuse.
+.TP
+.B \-\-dev
+Force le mode developpement. Le mode dev est auto-detecte lors de
+l'execution depuis l'arborescence source ou si .urpm.local existe.
+.TP
+.B \-\-prod
+Force le mode production, en ignorant la detection de .urpm.local.
+.SH PORTS RESEAU
+.TP
+.B TCP 9876
+Serveur HTTP pour les telechargements et l'API.
+.TP
+.B UDP 9878
+Decouverte P2P par broadcast/multicast.
+.PP
+Ces ports doivent etre ouverts dans le pare-feu pour que le partage P2P
+fonctionne. Le paquet urpm-ng configure automatiquement shorewall si present.
+.SH PARTAGE P2P
+Quand urpmd s'execute sur plusieurs machines du meme reseau local :
+.IP \(bu 2
+Les machines se decouvrent via broadcast UDP sur le port 9878
+.IP \(bu 2
+Quand un paquet est necessaire, urpm verifie d'abord les pairs locaux
+.IP \(bu 2
+Les paquets sont telecharges depuis les pairs si disponibles (plus rapide)
+.IP \(bu 2
+Repli sur les serveurs configures si les pairs n'ont pas le paquet
+.PP
+Le partage P2P respecte les signatures - seuls les paquets signes
+provenant de pairs de confiance sont utilises.
+.SH TELECHARGEMENTS PREDICTIFS
+Le demon surveille les patterns d'acces aux paquets et peut pre-telecharger
+les paquets susceptibles d'etre bientot necessaires, en se basant sur :
+.IP \(bu 2
+Les dependances des paquets recemment installes
+.IP \(bu 2
+Les patterns de mise a jour des medias configures
+.IP \(bu 2
+La detection du reseau inactif pour eviter d'impacter l'utilisateur
+.SH FICHIERS
+.TP
+.I /var/lib/urpm/packages.db
+Base de donnees SQLite contenant les metadonnees des paquets,
+les informations sur les pairs et l'historique des telechargements.
+.TP
+.I /var/lib/urpm/medias/
+Repertoire contenant les paquets en cache, organises par media.
+.TP
+.I /run/urpmd.pid
+Fichier PID (mode production).
+.TP
+.I /var/log/urpmd.log
+Fichier journal (si systemd journal n'est pas utilise).
+.SH SYSTEMD
+Le demon est controle via systemd :
+.TP
+Demarrer le demon :
+.B systemctl start urpmd
+.TP
+Arreter le demon :
+.B systemctl stop urpmd
+.TP
+Activer au demarrage :
+.B systemctl enable urpmd
+.TP
+Verifier le statut :
+.B systemctl status urpmd
+.TP
+Voir les logs :
+.B journalctl -u urpmd
+.SH EXEMPLES
+.TP
+Executer en avant-plan pour debogage :
+.B urpmd -f -v
+.TP
+Executer sur un port alternatif :
+.B urpmd -p 8080
+.SH VOIR AUSSI
+.BR urpm (1),
+.BR systemctl (1),
+.BR journalctl (1)
+.SH BOGUES
+Signaler les bogues sur https://github.com/pvi-github/urpm-ng/issues
+.SH AUTEURS
+Pascal Music et contributeurs.
+.SH COPYRIGHT
+Copyright (C) 2024-2025 Pascal Music.
+Sous licence GPLv3+.

@@ -1,0 +1,256 @@
+.\" Man page for urpm
+.TH URPM 1 "January 2025" "urpm-ng" "User Commands"
+.SH NAME
+urpm \- modern package manager for Mageia Linux
+.SH SYNOPSIS
+.B urpm
+.RI [ options ]
+.I command
+.RI [ arguments ]
+.SH DESCRIPTION
+.B urpm
+is a modern package manager for Mageia Linux, providing fast dependency
+resolution using libsolv, P2P package sharing between LAN machines,
+and an intuitive command-line interface.
+.PP
+It is designed as a complete rewrite of the classic urpmi toolset.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit.
+.TP
+.BR \-V ", " \-\-version
+Show version number and exit.
+.TP
+.BR \-v ", " \-\-verbose
+Verbose output.
+.TP
+.BR \-q ", " \-\-quiet
+Quiet output.
+.TP
+.B \-\-nocolor
+Disable colored output.
+.SH COMMANDS
+.SS Package Installation and Removal
+.TP
+.B install \fIpackage\fR ...
+Install one or more packages. Aliases: \fBi\fR.
+.RS
+.TP
+.BR \-y ", " \-\-auto
+No confirmation prompt.
+.TP
+.B \-\-download\-only
+Download packages without installing.
+.TP
+.B \-\-without\-recommends
+Do not install recommended packages.
+.TP
+.B \-\-with\-suggests
+Also install suggested packages.
+.RE
+.TP
+.B erase \fIpackage\fR ...
+Remove one or more packages. Aliases: \fBe\fR, \fBremove\fR.
+.RS
+.TP
+.BR \-y ", " \-\-auto
+No confirmation prompt.
+.TP
+.B \-\-auto\-orphans
+Also remove orphaned dependencies.
+.RE
+.TP
+.B autoremove
+Remove orphaned packages, old kernels, or failed dependencies.
+.SS Package Updates
+.TP
+.B update \fR[\fIpackage\fR ...]
+Update specific packages or all if none specified. Aliases: \fBu\fR.
+.TP
+.B upgrade \fR[\fIpackage\fR ...]
+Upgrade packages (system upgrade if none specified). Aliases: \fBup\fR.
+.SS Package Information
+.TP
+.B search \fIpattern\fR
+Search for packages by name or description. Aliases: \fBs\fR, \fBquery\fR, \fBq\fR.
+.TP
+.B show \fIpackage\fR
+Show detailed package information.
+.TP
+.B list \fR[\fIpattern\fR]
+List packages. Use \fB\-\-installed\fR for installed packages only.
+.TP
+.B provides \fIpackage\fR
+Show what capabilities a package provides.
+.TP
+.B whatprovides \fIcapability\fR
+Find packages providing a capability.
+.TP
+.B find \fIfile\fR
+Find which package contains a file.
+.TP
+.B depends \fIpackage\fR
+Show package dependencies.
+.TP
+.B rdepends \fIpackage\fR
+Show reverse dependencies.
+.TP
+.B why \fIpackage\fR
+Explain why a package is installed.
+.SS Media and Server Management
+.TP
+.B media \fR[\fIsubcommand\fR]
+Manage media sources. Without subcommand, lists media.
+.RS
+.TP
+.B list
+List configured media.
+.TP
+.B add \fIname\fR \fIurl\fR
+Add a new media.
+.TP
+.B remove \fIname\fR
+Remove a media.
+.TP
+.B enable \fIname\fR
+Enable a media.
+.TP
+.B disable \fIname\fR
+Disable a media.
+.TP
+.B update \fR[\fIname\fR]
+Update media metadata (parallel).
+.TP
+.B import
+Import media configuration from urpmi.
+.RE
+.TP
+.B server \fR[\fIsubcommand\fR]
+Manage download servers. Without subcommand, lists servers.
+.RS
+.TP
+.B list
+List configured servers.
+.TP
+.B add \fIname\fR \fIurl\fR
+Add a new server.
+.TP
+.B remove \fIname\fR
+Remove a server.
+.TP
+.B enable \fIname\fR
+Enable a server.
+.TP
+.B disable \fIname\fR
+Disable a server.
+.TP
+.B priority \fIname\fR \fIN\fR
+Set server priority (lower = preferred).
+.TP
+.B autoconfig
+Auto-configure servers by testing mirrors.
+.RE
+.SS P2P and Cache
+.TP
+.B peer \fR[\fIsubcommand\fR]
+Manage P2P peers. Without subcommand, lists peers.
+.RS
+.TP
+.B list
+List discovered peers and download statistics.
+.TP
+.B blacklist \fIhost\fR
+Block a peer.
+.TP
+.B unblacklist \fIhost\fR
+Unblock a peer.
+.TP
+.B clean \fIhost\fR
+Delete RPMs downloaded from a peer.
+.RE
+.TP
+.B cache \fIsubcommand\fR
+Manage the package cache.
+.RS
+.TP
+.B clean
+Remove orphan RPMs from cache.
+.TP
+.B info
+Show cache statistics.
+.RE
+.SS History and Rollback
+.TP
+.B history \fR[\fIN\fR]
+Show transaction history. Default: last 10 transactions.
+.TP
+.B rollback \fIspec\fR
+Rollback transactions.
+.RS
+.TP
+.B rollback 5
+Rollback last 5 transactions.
+.TP
+.B rollback to 42
+Rollback to transaction #42.
+.TP
+.B rollback to 26/11/2025
+Rollback to a specific date.
+.RE
+.TP
+.B undo \fR[\fIN\fR]
+Undo last transaction, or transaction #N.
+.SS Configuration
+.TP
+.B config \fIsubcommand\fR
+Manage urpm configuration.
+.TP
+.B key \fIsubcommand\fR
+Manage GPG keys for package verification.
+.TP
+.B mark \fIpackage\fR manual|auto
+Mark packages as manually or automatically installed.
+.SH FILES
+.TP
+.I /var/lib/urpm/
+Database and cache directory.
+.TP
+.I /var/lib/urpm/packages.db
+SQLite database for package metadata and history.
+.TP
+.I /var/lib/urpm/medias/
+Downloaded packages cache.
+.TP
+.I /etc/bash_completion.d/urpm
+Bash completion script.
+.SH EXAMPLES
+.TP
+Install a package:
+.B urpm install firefox
+.TP
+Search for packages:
+.B urpm search video player
+.TP
+Update all packages:
+.B urpm update
+.TP
+Remove a package and orphans:
+.B urpm erase \-\-auto\-orphans gimp
+.TP
+Show why a package is installed:
+.B urpm why libpng
+.TP
+Update media metadata:
+.B urpm media update
+.SH SEE ALSO
+.BR urpmd (8),
+.BR rpm (8),
+.BR dnf (8)
+.SH BUGS
+Report bugs at https://github.com/pvi-github/urpm-ng/issues
+.SH AUTHORS
+Pascal Music and contributors.
+.SH COPYRIGHT
+Copyright (C) 2024-2025 Pascal Music.
+Licensed under GPLv3+.

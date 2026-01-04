@@ -39,8 +39,9 @@
 - [ ] Intégrer config auto-install (scheduling, policies)
 
 ### Documentation EN/FR
-- [ ] Pages man
+- [x] Pages man (urpm.1, urpmd.8 en EN et FR)
 - [ ] Guide migration urpmi → urpm
+- [ ] Revue complète : cohérence code/docs (chemins, options, comportements)
 
 ### --downloadonly / download
 - [x] Option `--download-only` sur install

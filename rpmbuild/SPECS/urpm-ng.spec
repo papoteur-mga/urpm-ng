@@ -62,6 +62,14 @@ install -m644 doc/*.md %{buildroot}%{_docdir}/%{name}/
 # Install bash completion
 install -Dm644 completion/urpm.bash %{buildroot}%{_sysconfdir}/bash_completion.d/urpm
 
+# Install man pages (English)
+install -Dm644 man/en/man1/urpm.1 %{buildroot}%{_mandir}/man1/urpm.1
+install -Dm644 man/en/man8/urpmd.8 %{buildroot}%{_mandir}/man8/urpmd.8
+
+# Install man pages (French)
+install -Dm644 man/fr/man1/urpm.1 %{buildroot}%{_mandir}/fr/man1/urpm.1
+install -Dm644 man/fr/man8/urpmd.8 %{buildroot}%{_mandir}/fr/man8/urpmd.8
+
 %post
 /usr/bin/systemctl daemon-reload >/dev/null 2>&1 || :
 
@@ -135,5 +143,9 @@ fi
 %{_bindir}/urpmd
 %{_unitdir}/urpmd.service
 %{_sysconfdir}/bash_completion.d/urpm
+%{_mandir}/man1/urpm.1*
+%{_mandir}/man8/urpmd.8*
+%{_mandir}/fr/man1/urpm.1*
+%{_mandir}/fr/man8/urpmd.8*
 
 %changelog

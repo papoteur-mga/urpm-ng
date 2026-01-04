@@ -1,0 +1,126 @@
+.\" Man page for urpmd
+.TH URPMD 8 "January 2025" "urpm-ng" "System Administration"
+.SH NAME
+urpmd \- urpm daemon for intelligent cache management and P2P sharing
+.SH SYNOPSIS
+.B urpmd
+.RI [ options ]
+.SH DESCRIPTION
+.B urpmd
+is the background daemon for urpm-ng. It provides:
+.IP \(bu 2
+Intelligent package caching with predictive downloads
+.IP \(bu 2
+P2P package sharing between LAN machines
+.IP \(bu 2
+HTTP server for serving cached packages to peers
+.IP \(bu 2
+Automatic peer discovery via UDP broadcast
+.IP \(bu 2
+Background metadata updates
+.PP
+The daemon is managed via systemd and starts automatically after installation.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit.
+.TP
+.BR \-f ", " \-\-foreground
+Run in foreground (do not daemonize). Useful for debugging.
+.TP
+.BR \-p ", " \-\-port " " \fIPORT\fR
+HTTP server port. Default: 9876 (production), 9877 (development).
+.TP
+.BR \-H ", " \-\-host " " \fIHOST\fR
+HTTP server bind address. Default: 0.0.0.0 (all interfaces).
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose logging.
+.TP
+.B \-\-dev
+Force development mode. Development mode is auto-detected when
+running from the source tree or when .urpm.local exists.
+.TP
+.B \-\-prod
+Force production mode, ignoring .urpm.local detection.
+.SH NETWORK PORTS
+.TP
+.B TCP 9876
+HTTP server for package downloads and API.
+.TP
+.B UDP 9878
+P2P discovery broadcast/multicast.
+.PP
+These ports must be open in the firewall for P2P sharing to work.
+The urpm-ng package automatically configures shorewall if present.
+.SH P2P SHARING
+When urpmd runs on multiple machines on the same LAN:
+.IP \(bu 2
+Machines discover each other via UDP broadcast on port 9878
+.IP \(bu 2
+When a package is needed, urpm checks local peers first
+.IP \(bu 2
+Packages are downloaded from peers when available (faster than mirrors)
+.IP \(bu 2
+Fall back to configured servers if peers don't have the package
+.PP
+P2P sharing respects package signatures - only signed packages from
+trusted peers are used.
+.SH PREDICTIVE DOWNLOADS
+The daemon monitors package access patterns and can pre-download
+packages that are likely to be needed soon, based on:
+.IP \(bu 2
+Dependencies of recently installed packages
+.IP \(bu 2
+Update patterns from configured media
+.IP \(bu 2
+Idle network detection to avoid impacting user activities
+.SH FILES
+.TP
+.I /var/lib/urpm/packages.db
+SQLite database containing package metadata, peer information,
+and download history.
+.TP
+.I /var/lib/urpm/medias/
+Directory containing cached packages, organized by media.
+.TP
+.I /run/urpmd.pid
+PID file (production mode).
+.TP
+.I /var/log/urpmd.log
+Log file (when not using systemd journal).
+.SH SYSTEMD
+The daemon is controlled via systemd:
+.TP
+Start the daemon:
+.B systemctl start urpmd
+.TP
+Stop the daemon:
+.B systemctl stop urpmd
+.TP
+Enable at boot:
+.B systemctl enable urpmd
+.TP
+Check status:
+.B systemctl status urpmd
+.TP
+View logs:
+.B journalctl -u urpmd
+.SH EXAMPLES
+.TP
+Run in foreground for debugging:
+.B urpmd -f -v
+.TP
+Run on alternate port:
+.B urpmd -p 8080
+.SH SEE ALSO
+.BR urpm (1),
+.BR systemctl (1),
+.BR journalctl (1)
+.SH BUGS
+Report bugs at https://github.com/pvi-github/urpm-ng/issues
+.SH AUTHORS
+Pascal Music and contributors.
+.SH COPYRIGHT
+Copyright (C) 2024-2025 Pascal Music.
+Licensed under GPLv3+.

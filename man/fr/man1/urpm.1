@@ -1,0 +1,257 @@
+.\" Page de manuel pour urpm
+.TH URPM 1 "Janvier 2025" "urpm-ng" "Commandes utilisateur"
+.SH NOM
+urpm \- gestionnaire de paquets moderne pour Mageia Linux
+.SH SYNOPSIS
+.B urpm
+.RI [ options ]
+.I commande
+.RI [ arguments ]
+.SH DESCRIPTION
+.B urpm
+est un gestionnaire de paquets moderne pour Mageia Linux, offrant une
+resolution rapide des dependances via libsolv, le partage de paquets
+en P2P entre machines du reseau local, et une interface en ligne de
+commande intuitive.
+.PP
+Il est concu comme une reecriture complete de la suite d'outils urpmi.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Affiche l'aide et quitte.
+.TP
+.BR \-V ", " \-\-version
+Affiche le numero de version et quitte.
+.TP
+.BR \-v ", " \-\-verbose
+Mode verbeux.
+.TP
+.BR \-q ", " \-\-quiet
+Mode silencieux.
+.TP
+.B \-\-nocolor
+Desactive les couleurs.
+.SH COMMANDES
+.SS Installation et suppression de paquets
+.TP
+.B install \fIpaquet\fR ...
+Installe un ou plusieurs paquets. Alias : \fBi\fR.
+.RS
+.TP
+.BR \-y ", " \-\-auto
+Pas de confirmation.
+.TP
+.B \-\-download\-only
+Telecharge sans installer.
+.TP
+.B \-\-without\-recommends
+N'installe pas les paquets recommandes.
+.TP
+.B \-\-with\-suggests
+Installe aussi les paquets suggeres.
+.RE
+.TP
+.B erase \fIpaquet\fR ...
+Supprime un ou plusieurs paquets. Alias : \fBe\fR, \fBremove\fR.
+.RS
+.TP
+.BR \-y ", " \-\-auto
+Pas de confirmation.
+.TP
+.B \-\-auto\-orphans
+Supprime aussi les dependances orphelines.
+.RE
+.TP
+.B autoremove
+Supprime les paquets orphelins, anciens noyaux ou dependances cassees.
+.SS Mises a jour
+.TP
+.B update \fR[\fIpaquet\fR ...]
+Met a jour des paquets specifiques ou tous si aucun n'est specifie. Alias : \fBu\fR.
+.TP
+.B upgrade \fR[\fIpaquet\fR ...]
+Met a niveau les paquets (tout le systeme si aucun n'est specifie). Alias : \fBup\fR.
+.SS Informations sur les paquets
+.TP
+.B search \fImotif\fR
+Recherche des paquets par nom ou description. Alias : \fBs\fR, \fBquery\fR, \fBq\fR.
+.TP
+.B show \fIpaquet\fR
+Affiche les details d'un paquet.
+.TP
+.B list \fR[\fImotif\fR]
+Liste les paquets. Utilisez \fB\-\-installed\fR pour les paquets installes.
+.TP
+.B provides \fIpaquet\fR
+Affiche les capacites fournies par un paquet.
+.TP
+.B whatprovides \fIcapacite\fR
+Trouve les paquets fournissant une capacite.
+.TP
+.B find \fIfichier\fR
+Trouve le paquet contenant un fichier.
+.TP
+.B depends \fIpaquet\fR
+Affiche les dependances d'un paquet.
+.TP
+.B rdepends \fIpaquet\fR
+Affiche les dependances inverses.
+.TP
+.B why \fIpaquet\fR
+Explique pourquoi un paquet est installe.
+.SS Gestion des medias et serveurs
+.TP
+.B media \fR[\fIsous-commande\fR]
+Gere les sources de medias. Sans sous-commande, liste les medias.
+.RS
+.TP
+.B list
+Liste les medias configures.
+.TP
+.B add \fInom\fR \fIurl\fR
+Ajoute un nouveau media.
+.TP
+.B remove \fInom\fR
+Supprime un media.
+.TP
+.B enable \fInom\fR
+Active un media.
+.TP
+.B disable \fInom\fR
+Desactive un media.
+.TP
+.B update \fR[\fInom\fR]
+Met a jour les metadonnees (en parallele).
+.TP
+.B import
+Importe la configuration depuis urpmi.
+.RE
+.TP
+.B server \fR[\fIsous-commande\fR]
+Gere les serveurs de telechargement. Sans sous-commande, liste les serveurs.
+.RS
+.TP
+.B list
+Liste les serveurs configures.
+.TP
+.B add \fInom\fR \fIurl\fR
+Ajoute un nouveau serveur.
+.TP
+.B remove \fInom\fR
+Supprime un serveur.
+.TP
+.B enable \fInom\fR
+Active un serveur.
+.TP
+.B disable \fInom\fR
+Desactive un serveur.
+.TP
+.B priority \fInom\fR \fIN\fR
+Definit la priorite (plus bas = prefere).
+.TP
+.B autoconfig
+Configure automatiquement les serveurs en testant les miroirs.
+.RE
+.SS P2P et cache
+.TP
+.B peer \fR[\fIsous-commande\fR]
+Gere les pairs P2P. Sans sous-commande, liste les pairs.
+.RS
+.TP
+.B list
+Liste les pairs decouverts et les statistiques.
+.TP
+.B blacklist \fIhote\fR
+Bloque un pair.
+.TP
+.B unblacklist \fIhote\fR
+Debloque un pair.
+.TP
+.B clean \fIhote\fR
+Supprime les RPM telecharges depuis un pair.
+.RE
+.TP
+.B cache \fIsous-commande\fR
+Gere le cache de paquets.
+.RS
+.TP
+.B clean
+Supprime les RPM orphelins du cache.
+.TP
+.B info
+Affiche les statistiques du cache.
+.RE
+.SS Historique et retour arriere
+.TP
+.B history \fR[\fIN\fR]
+Affiche l'historique des transactions. Par defaut : 10 dernieres.
+.TP
+.B rollback \fIspec\fR
+Annule des transactions.
+.RS
+.TP
+.B rollback 5
+Annule les 5 dernieres transactions.
+.TP
+.B rollback to 42
+Revient a la transaction #42.
+.TP
+.B rollback to 26/11/2025
+Revient a une date specifique.
+.RE
+.TP
+.B undo \fR[\fIN\fR]
+Annule la derniere transaction, ou la transaction #N.
+.SS Configuration
+.TP
+.B config \fIsous-commande\fR
+Gere la configuration d'urpm.
+.TP
+.B key \fIsous-commande\fR
+Gere les cles GPG pour la verification des paquets.
+.TP
+.B mark \fIpaquet\fR manual|auto
+Marque les paquets comme installes manuellement ou automatiquement.
+.SH FICHIERS
+.TP
+.I /var/lib/urpm/
+Repertoire de la base de donnees et du cache.
+.TP
+.I /var/lib/urpm/packages.db
+Base de donnees SQLite pour les metadonnees et l'historique.
+.TP
+.I /var/lib/urpm/medias/
+Cache des paquets telecharges.
+.TP
+.I /etc/bash_completion.d/urpm
+Script de completion Bash.
+.SH EXEMPLES
+.TP
+Installer un paquet :
+.B urpm install firefox
+.TP
+Rechercher des paquets :
+.B urpm search lecteur video
+.TP
+Mettre a jour tous les paquets :
+.B urpm update
+.TP
+Supprimer un paquet et les orphelins :
+.B urpm erase \-\-auto\-orphans gimp
+.TP
+Expliquer pourquoi un paquet est installe :
+.B urpm why libpng
+.TP
+Mettre a jour les metadonnees :
+.B urpm media update
+.SH VOIR AUSSI
+.BR urpmd (8),
+.BR rpm (8),
+.BR dnf (8)
+.SH BOGUES
+Signaler les bogues sur https://github.com/pvi-github/urpm-ng/issues
+.SH AUTEURS
+Pascal Music et contributeurs.
+.SH COPYRIGHT
+Copyright (C) 2024-2025 Pascal Music.
+Sous licence GPLv3+.
