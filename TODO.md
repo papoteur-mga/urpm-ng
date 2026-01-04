@@ -8,6 +8,14 @@
 
 ## En cours
 
+### Clarification update/upgrade (style apt)
+Revoir la répartition des responsabilités :
+- `urpm update` = mise à jour métadonnées (media update, sync DB)
+- `urpm upgrade` = mise à jour des paquets
+- `urpm distupgrade` (futur) = mise à jour majeure du système
+
+Aujourd'hui c'est confus : update fait les deux selon les arguments.
+
 ### Alternatives (OR deps)
 - [ ] Tests intensifs install avec alternatives
 - [ ] Valider mode --auto
