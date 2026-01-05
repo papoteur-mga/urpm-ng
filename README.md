@@ -6,91 +6,85 @@ urpm-ng is a complete rewrite of the classic urpmi toolset, providing faster per
 
 ## Prerequisites
 
+### Distribution
+
+At the moment you need mageia 9 or Mageia 10.
+
+### Firewall ports to open (for P2P sharing)
+
+If you want to use P2P package sharing between LAN machines, open these ports:
+- **TCP 9876** (production) or **TCP 9877** (dev mode) - urpmd HTTP API
+broadcasts
+
+Use the Mageia Control Center (MCC) > Security > Firewall, or edit `/etc/shorewall/rules.drakx` directly.
+
+## Installation
+
 ### Required packages
 
-```bash
-urpmi python3-solv python3-zstandard
-```
+You'll need :
 
 - **python3-solv** - SAT-based dependency resolution
 - **python3-zstandard** - Decompression of synthesis.hdlist.cz files
 
-### Firewall ports (for P2P sharing)
+Normally installation process through RPM install will automatically install them.
 
-If you want to use P2P package sharing between LAN machines, open these ports:
-- **TCP 9876** (production) or **TCP 9877** (dev mode) - urpmd HTTP API
-- **UDP 9878** (production) or **UDP 9879** (dev mode) - Peer discovery broadcasts
-
-Use the Mageia Control Center (MCC) > Security > Firewall, or edit `/etc/shorewall/rules` directly.
-
-## Installation
-
-### Development mode
-
-Clone the repository and run directly (as root):
+If you want to install them manually:
 
 ```bash
-git clone https://github.com/pvi-github/urpm-ng.git
-cd urpm-ng
-
-# Switch to dev mode
-touch .urpm.local
-
-# Run daemon (without backgorund mode)
-./bin/urpmd --dev
-
-# Run urpm (in an other terminal)
-cd /where/is/urpm-ng
-./bin/urpm --help
+urpmi python3-solv python3-zstandard
 ```
+### Standard installation
 
-In dev mode, data is stored in `/var/lib/urpm-dev/` and the daemon uses port 9877.
+### RPM Install
 
-### Production mode
+Get last Release from https://github.com/pvi-github/urpm-ng/releases
+
+Download the RPM file that matches your Mageia version, and install it.
+
+Nota : at first install through rpm it will try to import its config from urpmi
 
 ```bash
-git clone https://github.com/pvi-github/urpm-ng.git
-cd urpm-ng
+# Mettez la dernière version à la place du 0.1.16
+export URPM_VERSION=0.1.16
 
-# just incase make sure dev mode is off
-rm -f .urpm.local
+curl --follow https://github.com/pvi-github/urpm-ng/releases/download/$URPM_VERSION/urpm-ng-$URPM_VERSION-1.$(rpm -qa | sed -ne "s/^mageia-release-Default[^m]*//p").noarch.rpm -o urpm-ng-$URPM_VERSION-1.$(rpm -qa | sed -ne "s/^mageia-release-Default[^m]*//p").noarch.rpm
 
-# Run daemon
-./bin/urpmd
+urpmi --auto urpm-ng-$URPM_VERSION-1.$(rpm -qa | sed -ne "s/^mageia-release-Default[^m]*//p").noarch.rpm
 
 # Run urpm 
 ./bin/urpm --help
 ```
+
+## Configuration
+
+Not needed at the moment.
 
 When installed system-wide (in `/usr/bin/`), urpm uses:
 - Database: `/var/lib/urpm/packages.db`
 - Daemon port: 9876
 - PID file: `/run/urpmd.pid`
 
-## Configuration
-
-### Dev mode configuration
-
-Create a `.urpm.local` file in the project root to customize dev mode:
-
-```ini
-# Custom base directory (optional)
-base_dir=/path/lib/urpm-dev
-```
-
 ### Media sources
 
-Configure package sources (mirrors):
+How to configure package media sources & mirrors servers.
+
+Nota : for RPM installation these steps should not be needed.
 
 ```bash
 # List configured media
 urpm media list
 
-# Import from existing urpmi.cfg
+# If there are none try to import from existing urpmi.cfg
 urpm media import /etc/urpmi/urpmi.cfg
 
-# Add a specific media source
-urpm media add "Core Release" http://mirror.example.com/distrib/10/x86_64/media/core/release
+# Add a specific media source if needed
+urpm media add http://mirror.example.com/distrib/10/x86_64/media/core/release
+urpm media add http://mirror.example.com/distrib/10/x86_64/media/core/updates
+urpm media add http://mirror.example.com/distrib/10/x86_64/media/core/update_testing
+
+# Configure more servers
+urpm server autoconfig
 
 # Update media metadata
 urpm media update
@@ -466,15 +460,7 @@ urpmd is a background service providing:
 - Scheduled background tasks
 - P2P peer discovery for LAN package sharing
 
-## Running the daemon
 
-```bash
-# Dev mode (port 9877, user data in ~/.cache/urpm/)
-./bin/urpmd
-
-# Production mode (port 9876, requires root)
-urpmd
-```
 
 ## API Endpoints
 
@@ -510,6 +496,78 @@ The daemon automatically performs:
 ## P2P Package Sharing
 
 When multiple machines on the same LAN run urpmd, they automatically discover each other and can share cached RPM packages, reducing bandwidth usage.
+
+# Development & contributing
+
+## Prerequisites
+
+### Firewall ports to open
+
+If you want to use P2P package sharing between LAN machines, open these ports:
+- **UDP 9878** (production) or **UDP 9879** (dev mode) - Peer discovery 
+
+### Setting up your environment
+
+Clone the repository :
+
+```bash
+git clone https://github.com/pvi-github/urpm-ng.git
+cd urpm-ng
+
+```
+
+
+### Dev mode configuration
+
+Create a `.urpm.local` file in the project root to customize dev mode:
+
+```bash
+cd /where/is/urpm-ng
+
+# Dev mode (port 9877, user data in ~/var/lib/urpm-dev/)
+# Switch to dev mode
+touch .urpm.local
+```
+
+Nota, you can change where urpm & uprmd put their data by editing .urpm.local file :
+```ini
+# Custom base directory (optional)
+base_dir=/path/lib/urpm-dev
+```
+
+In dev mode, by default, data is stored in `/var/lib/urpm-dev/` and the daemon uses port 9877.
+
+**Note that in dev mode urpmd will only interact with other urpmd in dev mode.**
+
+## Running the daemon
+
+```bash
+# Run daemon (as root, without background mode)
+
+cd /where/is/urpm-ng
+
+./bin/urpmd --dev
+
+```
+
+## Running urpm
+
+```bash
+# Run urpm (as root in a specific concole)
+
+cd /where/is/urpm-ng
+
+./bin/urpm --help
+
+```
+
+## Coding, testing, contributing...
+
+TODO.
+
+contribution can be of various sorts : code, testing, translating, giving feedback... no contribution it too tiny. Even telling that you spoetted a typo in documentation is valuable.
+
+This part will also  talk about creating branches, submitting merge requests, doing clean commits, state of the art commit messages, commenting code, writing state of the art issues...
 
 ---
 
