@@ -335,21 +335,24 @@ class UrpmDaemon:
             )
         return {'error': 'Discovery not initialized'}
 
-    def check_have_packages(self, packages: List[str]) -> Dict[str, Any]:
+    def check_have_packages(self, packages: List[str], version: str = None,
+                            arch: str = None) -> Dict[str, Any]:
         """Check which packages are available in local cache.
 
         Searches recursively for RPM files in medias/ directory.
         Structure: official/<version>/<arch>/media/<type>/<release>/*.rpm
 
-        The Mageia version and architecture are encoded in the RPM filename
-        (e.g., foo-1.0-1.mga10.x86_64.rpm) so packages from different
-        versions/architectures won't be confused.
-
         Args:
             packages: List of RPM filenames to check
+            version: Optional Mageia version filter (e.g., "10", "cauldron")
+            arch: Optional architecture filter (e.g., "x86_64", "aarch64")
 
         Returns:
             Dict with 'available' (list with filename, size, path) and 'missing'
+
+        When version/arch are specified, only packages from matching paths are
+        returned. This enables multi-release support for chroot builds where
+        a host (e.g., mga9) serves packages for a different release (e.g., mga10).
         """
         available = []
         missing = []
@@ -369,6 +372,14 @@ class UrpmDaemon:
         if not hasattr(self, '_rpm_index') or self._rpm_index is None:
             self._build_rpm_index()
 
+        # Build path prefix filter for version/arch
+        # Path structure: official/<version>/<arch>/media/...
+        path_prefix = None
+        if version and arch:
+            path_prefix = f"official/{version}/{arch}/"
+        elif version:
+            path_prefix = f"official/{version}/"
+
         for filename in packages:
             if not filename or not filename.endswith('.rpm'):
                 missing.append(filename or '<invalid>')
@@ -376,10 +387,25 @@ class UrpmDaemon:
 
             if filename in self._rpm_index:
                 info = self._rpm_index[filename]
+                path = info['path']
+
+                # Apply version/arch filter
+                if path_prefix:
+                    if not path.startswith(path_prefix):
+                        missing.append(filename)
+                        continue
+                elif arch:
+                    # Check arch in path without version filter
+                    # Path format: official/<version>/<arch>/media/...
+                    parts = path.split('/')
+                    if len(parts) >= 3 and parts[2] != arch:
+                        missing.append(filename)
+                        continue
+
                 available.append({
                     'filename': filename,
                     'size': info['size'],
-                    'path': info['path'],
+                    'path': path,
                 })
             else:
                 missing.append(filename)

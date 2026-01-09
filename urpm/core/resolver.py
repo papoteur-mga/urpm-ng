@@ -264,20 +264,26 @@ class Resolution:
 class Resolver:
     """Dependency resolver using libsolv."""
 
-    def __init__(self, db: PackageDatabase, arch: str = "x86_64", root: str = "/",
-                 install_recommends: bool = True):
+    def __init__(self, db: PackageDatabase, arch: str = "x86_64", root: str = None,
+                 urpm_root: str = None, install_recommends: bool = True,
+                 ignore_installed: bool = False):
         """Initialize resolver.
 
         Args:
             db: Package database
             arch: System architecture
-            root: RPM database root (default: /)
+            root: RPM database root for chroot install (--root)
+            urpm_root: Root for both urpm config and RPM (--urpm-root)
             install_recommends: Install recommended packages (default: True)
+            ignore_installed: If True, resolve as if nothing is installed (for download-only)
         """
         self.db = db
         self.arch = arch
-        self.root = root
+        # --urpm-root implies --root to same location
+        self.root = urpm_root or root
+        self.urpm_root = urpm_root
         self.install_recommends = install_recommends
+        self.ignore_installed = ignore_installed
         self.pool = None
         self._solvable_to_pkg = {}  # Map solvable id -> pkg dict
         self._installed_count = 0  # Number of installed packages loaded
@@ -290,28 +296,91 @@ class Resolver:
         - add_mdk() for loading synthesis files directly
         """
         import tempfile
+        debug = get_solver_debug()
 
         pool = solv.Pool()
         pool.setdisttype(solv.Pool.DISTTYPE_RPM)
         pool.setarch(self.arch)
+        debug.log(f"Creating pool for arch={self.arch}, root={self.root}, urpm_root={self.urpm_root}")
 
-        # Load installed packages from rpmdb using native method
-        installed = pool.add_repo("@System")
-        installed.appdata = {"type": "installed"}
-        pool.installed = installed
+        # Set root directory for chroot installations
+        if self.root:
+            pool.set_rootdir(self.root)
 
-        if HAS_RPM:
-            installed.add_rpmdb()
-            self._installed_count = installed.nsolvables
-        else:
+        # Load installed packages from rpmdb (skip if ignore_installed for download-only)
+        if self.ignore_installed:
+            debug.log("ignore_installed=True: skipping rpmdb loading")
             self._installed_count = 0
+        else:
+            installed = pool.add_repo("@System")
+            installed.appdata = {"type": "installed"}
+            pool.installed = installed
+
+            if HAS_RPM:
+                # Note: libsolv's add_rpmdb() doesn't respect set_rootdir()
+                # For chroot installs, we need to use rpm module directly
+                if self.root:
+                    # Use rpm module to read from chroot's rpmdb
+                    import rpm
+                    ts = rpm.TransactionSet(self.root)
+                    ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES | rpm._RPMVSF_NODIGESTS)
+
+                    # Map RPM flags to libsolv relation flags
+                    def rpm_flags_to_solv(flags):
+                        rel = 0
+                        if flags & rpm.RPMSENSE_LESS:
+                            rel |= solv.REL_LT
+                        if flags & rpm.RPMSENSE_GREATER:
+                            rel |= solv.REL_GT
+                        if flags & rpm.RPMSENSE_EQUAL:
+                            rel |= solv.REL_EQ
+                        return rel
+
+                    for hdr in ts.dbMatch():
+                        s = installed.add_solvable()
+                        s.name = hdr[rpm.RPMTAG_NAME]
+                        epoch = hdr[rpm.RPMTAG_EPOCH] or 0
+                        version = hdr[rpm.RPMTAG_VERSION]
+                        release = hdr[rpm.RPMTAG_RELEASE]
+                        s.evr = f"{epoch}:{version}-{release}" if epoch else f"{version}-{release}"
+                        s.arch = hdr[rpm.RPMTAG_ARCH] or "noarch"
+
+                        # Add provides
+                        prov_names = hdr[rpm.RPMTAG_PROVIDENAME] or []
+                        prov_flags = hdr[rpm.RPMTAG_PROVIDEFLAGS] or []
+                        prov_vers = hdr[rpm.RPMTAG_PROVIDEVERSION] or []
+                        for i, pname in enumerate(prov_names):
+                            pflags = prov_flags[i] if i < len(prov_flags) else 0
+                            pver = prov_vers[i] if i < len(prov_vers) else ''
+                            if pver and pflags:
+                                dep_id = pool.rel2id(
+                                    pool.str2id(pname),
+                                    pool.str2id(pver),
+                                    rpm_flags_to_solv(pflags)
+                                )
+                            else:
+                                dep_id = pool.str2id(pname)
+                            s.add_deparray(solv.SOLVABLE_PROVIDES, dep_id)
+
+                    self._installed_count = installed.nsolvables
+                    debug.log(f"Loaded {self._installed_count} installed packages from chroot rpmdb")
+                else:
+                    # Normal case: use libsolv's native method
+                    installed.add_rpmdb()
+                    self._installed_count = installed.nsolvables
+            else:
+                self._installed_count = 0
 
         # Load available packages from synthesis files (much faster than SQLite)
-        base_dir = get_base_dir()
+        # Use urpm_root for config paths if specified
+        base_dir = get_base_dir(urpm_root=self.urpm_root)
+        debug.log(f"Base dir for synthesis: {base_dir}")
         media_list = self.db.list_media()
+        debug.log(f"Found {len(media_list)} media in database")
 
         for media in media_list:
             if not media['enabled']:
+                debug.log(f"Skipping disabled media: {media['name']}")
                 continue
 
             repo = pool.add_repo(media['name'])
@@ -320,6 +389,7 @@ class Resolver:
             # Try to load from synthesis file first
             media_path = get_media_local_path(media, base_dir)
             synthesis_path = media_path / "media_info" / "synthesis.hdlist.cz"
+            debug.log(f"Media {media['name']}: looking for {synthesis_path} (exists: {synthesis_path.exists()})")
 
             if synthesis_path.exists():
                 try:
@@ -347,16 +417,18 @@ class Resolver:
                             'size': s.lookup_num(solv.SOLVABLE_INSTALLSIZE) or 0,
                             'media_name': repo.name,
                         }
+                    debug.log(f"Loaded {repo.nsolvables} packages from synthesis")
                 except Exception as e:
-                    if DEBUG_RESOLVER:
-                        print(f"[RESOLVER] Failed to load synthesis for {media['name']}: {e}")
+                    debug.log(f"Failed to load synthesis for {media['name']}: {e}")
                     # Fallback to SQLite loading
                     self._load_repo_packages(pool, repo, media['id'])
             else:
                 # No synthesis file, fallback to SQLite
+                debug.log(f"No synthesis, falling back to SQLite for {media['name']}")
                 self._load_repo_packages(pool, repo, media['id'])
 
         pool.createwhatprovides()
+        debug.log_pool_stats(pool)
         return pool
 
     def _load_repo_packages(self, pool: solv.Pool, repo: solv.Repo, media_id: int):
@@ -1220,6 +1292,13 @@ class Resolver:
         # Filter out alternatives where user already made a choice
         all_alternatives = self._find_alternatives(solver, trans, actions)
         alternatives = [alt for alt in all_alternatives if alt.capability not in choices]
+
+        # Filter out alternatives where a provider is explicitly requested by user
+        # e.g., if user requests vim-minimal, don't ask them to choose between vim providers
+        requested_names = {n.split()[0].split('<')[0].split('>')[0].split('=')[0].strip()
+                          for n in package_names}
+        alternatives = [alt for alt in alternatives
+                       if not any(p in requested_names for p in alt.providers)]
 
         # If there are unresolved alternatives, return them for user choice
         if alternatives:
@@ -2339,7 +2418,8 @@ class Resolver:
 
     def _get_unrequested_file(self) -> Path:
         """Get path to the installed-through-deps.list file."""
-        return Path(self.root) / 'var/lib/rpm/installed-through-deps.list'
+        root = self.root or '/'
+        return Path(root) / 'var/lib/rpm/installed-through-deps.list'
 
     def _get_unrequested_packages(self) -> set:
         """Read the list of packages installed as dependencies (not explicitly requested).

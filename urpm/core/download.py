@@ -583,7 +583,8 @@ class Downloader:
     """Download manager for RPM packages."""
 
     def __init__(self, cache_dir: Path = None, max_workers: int = 4,
-                 use_peers: bool = True, db: 'PackageDatabase' = None):
+                 use_peers: bool = True, db: 'PackageDatabase' = None,
+                 target_version: str = None, target_arch: str = None):
         """Initialize downloader.
 
         Args:
@@ -591,12 +592,16 @@ class Downloader:
             max_workers: Max parallel downloads
             use_peers: Whether to use P2P peer discovery for downloads
             db: Database for provenance tracking and blacklist (optional)
+            target_version: Target Mageia version for P2P queries (e.g., "10")
+            target_arch: Target architecture for P2P queries (e.g., "x86_64")
         """
         self.cache_dir = cache_dir or get_base_dir()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_workers = max_workers
         self.use_peers = use_peers
         self.db = db
+        self.target_version = target_version
+        self.target_arch = target_arch
         self._peer_client: Optional[PeerClient] = None
 
     def get_cache_path(self, item: DownloadItem) -> Path:
@@ -1053,7 +1058,11 @@ class Downloader:
 
                 if peers:
                     filenames = [item.filename for item in to_download]
-                    peer_availability = self._peer_client.query_peers_have(peers, filenames)
+                    peer_availability = self._peer_client.query_peers_have(
+                        peers, filenames,
+                        version=self.target_version,
+                        arch=self.target_arch
+                    )
                     t2 = _time.time()
                     logger.debug(f"P2P: availability query took {t2-t1:.2f}s")
 

@@ -439,7 +439,9 @@ class UrpmdHandler(BaseHTTPRequestHandler):
 
         Request body:
             {
-                "packages": ["foo-1.0-1.mga10.x86_64.rpm", "bar-2.0-1.mga10.x86_64.rpm", ...]
+                "packages": ["foo-1.0-1.mga10.x86_64.rpm", "bar-2.0-1.mga10.x86_64.rpm", ...],
+                "version": "10",      # Optional: filter to specific Mageia version
+                "arch": "x86_64"      # Optional: filter to specific architecture
             }
 
         Response:
@@ -454,6 +456,10 @@ class UrpmdHandler(BaseHTTPRequestHandler):
             }
 
         The 'path' can be used to download: http://peer:port/media/{path}
+
+        When version/arch are specified, only packages from matching media paths
+        are returned (e.g., official/10/x86_64/...). This enables multi-release
+        support for chroot builds.
         """
         if not self.daemon:
             self.send_error_json(500, "Daemon not initialized")
@@ -468,7 +474,11 @@ class UrpmdHandler(BaseHTTPRequestHandler):
             self.send_error_json(400, "'packages' must be a list of filenames")
             return
 
-        result = self.daemon.check_have_packages(packages)
+        # Optional version/arch filters for multi-release support
+        version = data.get('version')
+        arch = data.get('arch')
+
+        result = self.daemon.check_have_packages(packages, version=version, arch=arch)
         self.send_json(result)
 
 

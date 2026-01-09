@@ -331,7 +331,8 @@ def check_media_update_needed(db: PackageDatabase, media_id: int,
 def sync_media(db: PackageDatabase, media_name: str,
                progress_callback: Callable[[str, int, int], None] = None,
                force: bool = False,
-               download_hdlist: bool = False) -> SyncResult:
+               download_hdlist: bool = False,
+               urpm_root: str = None) -> SyncResult:
     """Synchronize a media source.
 
     Downloads synthesis (and optionally hdlist), parses and imports into DB.
@@ -343,10 +344,13 @@ def sync_media(db: PackageDatabase, media_name: str,
         progress_callback: Optional callback(stage, current, total)
         force: Force update even if MD5 matches
         download_hdlist: Also download hdlist for full metadata
+        urpm_root: If set, store files in <urpm_root>/var/lib/urpm/
 
     Returns:
         SyncResult with status
     """
+    # Determine base directory (normal or urpm_root)
+    base_dir = get_base_dir(urpm_root=urpm_root)
     media = db.get_media(media_name)
     if not media:
         return SyncResult(success=False, error=f"Media '{media_name}' not found")
@@ -459,7 +463,7 @@ def sync_media(db: PackageDatabase, media_name: str,
         # Legacy: <hostname>/<media_name>/
         if media.get('relative_path'):
             # v8 schema - use new path structure
-            cache_media_dir = get_media_local_path(media)
+            cache_media_dir = get_media_local_path(media, base_dir)
         else:
             # Legacy - use old hostname-based structure
             cache_media_dir = get_media_cache_dir(media_name, media_url)
@@ -509,7 +513,8 @@ def sync_media(db: PackageDatabase, media_name: str,
 def sync_all_media(db: PackageDatabase,
                    progress_callback: Callable[[str, str, int, int], None] = None,
                    force: bool = False,
-                   max_workers: int = 4) -> List[Tuple[str, SyncResult]]:
+                   max_workers: int = 4,
+                   urpm_root: str = None) -> List[Tuple[str, SyncResult]]:
     """Synchronize all enabled media in parallel.
 
     Args:
@@ -517,6 +522,7 @@ def sync_all_media(db: PackageDatabase,
         progress_callback: Optional callback(media_name, stage, current, total)
         force: Force update even if MD5 matches
         max_workers: Maximum parallel downloads (default: 4)
+        urpm_root: If set, store files in <urpm_root>/var/lib/urpm/
 
     Returns:
         List of (media_name, SyncResult) tuples
@@ -543,7 +549,7 @@ def sync_all_media(db: PackageDatabase,
         def media_progress(stage, current, total):
             thread_safe_progress(media_name, stage, current, total)
 
-        result = sync_media(db, media_name, media_progress, force=force)
+        result = sync_media(db, media_name, media_progress, force=force, urpm_root=urpm_root)
         return (media_name, result)
 
     # Use parallel execution

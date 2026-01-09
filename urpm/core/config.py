@@ -155,15 +155,19 @@ def is_dev_mode() -> bool:
     return _detect_mode()['is_dev']
 
 
-def get_base_dir(dev_mode: bool = None) -> Path:
+def get_base_dir(dev_mode: bool = None, urpm_root: str = None) -> Path:
     """Get base directory.
 
     Args:
         dev_mode: Force DEV mode if True, PROD if False, auto-detect if None
+        urpm_root: If set, return <urpm_root>/var/lib/urpm instead
 
     Returns:
         Base directory path
     """
+    if urpm_root:
+        # When using --urpm-root, base_dir is inside the chroot
+        return Path(urpm_root) / "var/lib/urpm"
     if dev_mode is True:
         return DEV_BASE_DIR
     if dev_mode is False:
@@ -171,17 +175,36 @@ def get_base_dir(dev_mode: bool = None) -> Path:
     return _detect_mode()['base_dir']
 
 
-def get_db_path(dev_mode: bool = None) -> Path:
+def get_db_path(dev_mode: bool = None, urpm_root: str = None) -> Path:
     """Get database path.
 
     Args:
         dev_mode: Force DEV mode if True, PROD if False, auto-detect if None
+        urpm_root: If set, return <urpm_root>/var/lib/urpm/packages.db
     """
+    if urpm_root:
+        return Path(urpm_root) / "var/lib/urpm/packages.db"
     if dev_mode is True:
         return DEV_DB_PATH
     if dev_mode is False:
         return PROD_DB_PATH
     return _detect_mode()['db_path']
+
+
+def get_rpm_root(root: str = None, urpm_root: str = None) -> Optional[str]:
+    """Get RPM root directory for chroot installation.
+
+    Args:
+        root: --root option (RPM installs here, urpm config from host)
+        urpm_root: --urpm-root option (both RPM and urpm config here)
+
+    Returns:
+        Root path for RPM, or None for normal system
+    """
+    # --urpm-root implies --root to the same location
+    if urpm_root:
+        return urpm_root
+    return root
 
 
 # =============================================================================

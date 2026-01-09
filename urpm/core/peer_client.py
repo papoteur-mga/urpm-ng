@@ -143,7 +143,10 @@ class PeerClient:
         return self.filter_peers_for_version(all_peers, version, arch)
 
     def _query_local_urpmd(self) -> List[Peer]:
-        """Query local urpmd for known peers."""
+        """Query local urpmd for known peers.
+
+        Includes local urpmd itself as first peer.
+        """
         ports_to_try = []
         if self.urpmd_port:
             ports_to_try = [self.urpmd_port]
@@ -159,7 +162,11 @@ class PeerClient:
 
                 with urllib.request.urlopen(req, timeout=1) as response:
                     data = json.loads(response.read().decode('utf-8'))
-                    peers = []
+
+                    # Local urpmd first
+                    peers = [Peer(host='127.0.0.1', port=port)]
+
+                    # Other peers
                     for p in data.get('peers', []):
                         if p.get('alive', True):
                             peers.append(Peer(
@@ -240,13 +247,16 @@ class PeerClient:
         except OSError:
             return '127.0.0.1'
 
-    def query_peers_have(self, peers: List[Peer], filenames: List[str]
+    def query_peers_have(self, peers: List[Peer], filenames: List[str],
+                         version: str = None, arch: str = None
                          ) -> Dict[str, List[PeerPackageInfo]]:
         """Query multiple peers for package availability.
 
         Args:
             peers: List of peers to query
             filenames: List of RPM filenames to check
+            version: Optional Mageia version filter (e.g., "10", "cauldron")
+            arch: Optional architecture filter (e.g., "x86_64")
 
         Returns:
             Dict mapping filename -> list of PeerPackageInfo (peers that have it)
@@ -261,7 +271,13 @@ class PeerClient:
             """Query a single peer."""
             try:
                 url = f"{peer.base_url}/api/have"
-                payload = json.dumps({'packages': filenames}).encode('utf-8')
+                # Build payload with optional version/arch filters
+                payload_dict = {'packages': filenames}
+                if version:
+                    payload_dict['version'] = version
+                if arch:
+                    payload_dict['arch'] = arch
+                payload = json.dumps(payload_dict).encode('utf-8')
 
                 req = urllib.request.Request(url, data=payload, method='POST')
                 req.add_header('Content-Type', 'application/json')
@@ -300,13 +316,16 @@ class PeerClient:
 
         return results
 
-    def query_have(self, filenames: List[str]) -> Dict[str, List[PeerPackageInfo]]:
+    def query_have(self, filenames: List[str], version: str = None,
+                   arch: str = None) -> Dict[str, List[PeerPackageInfo]]:
         """Discover peers and query them for package availability.
 
         Convenience method that combines discover_peers() and query_peers_have().
 
         Args:
             filenames: List of RPM filenames to check
+            version: Optional Mageia version filter
+            arch: Optional architecture filter
 
         Returns:
             Dict mapping filename -> list of PeerPackageInfo
@@ -314,7 +333,7 @@ class PeerClient:
         peers = self.discover_peers()
         if not peers:
             return {f: [] for f in filenames}
-        return self.query_peers_have(peers, filenames)
+        return self.query_peers_have(peers, filenames, version=version, arch=arch)
 
 
 @dataclass

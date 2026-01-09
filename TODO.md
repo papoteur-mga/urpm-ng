@@ -86,17 +86,22 @@ Aujourd'hui c'est confus : update fait les deux selon les arguments.
 - [ ] Phase apply (reboot ou online) en une fois ou deux fois
 - [ ] Gestion conflits version majeure
 
-### --rootdir ou --bootstrap
+### bootstrap, --root, --urpm-root
+image build / image list / image delete / 
 - [ ] il faut que urpm soit capable de faire un bootstrap et donc faire comme urpmi :
       - [ ] urpmi.addmedia --distrib --mirrorlist 'https://mirrors.mageia.org/api/mageia.cauldron.x86_64.list' --urpmi-root /tmp/mageia-rootfs
       - [ ] urpmi basesystem-minimal urpmi locales locales-en bash --auto --no-suggests --no-recommends --urpmi-root /tmp/mageia-rootfs --root /tmp/mageia-rootfs
 
-Il y a aussi le rpm mageia nommé rpmbootstrap qui est à regarder.
+Il y a aussi ce que fait le rpm mageia nommé rpmbootstrap qui est à regarder.
 
 Le principe est de pouvoir créer dans un répretoire donné toute l'arborescence nécessaire à la préparation d'un chroot ou d'une base d'image docker, donc :
 1. arborescence minimale
 2. initilalisation d'une base urpm (bonne archi, bonne version)
 3. installation du basesystem minimal (rpm, glibc, kerneli, bash, locales  de base, tzdata, vim, urpm, etc)
+
+urpm bootstrap </chemin/vers/repertoire> ferait tout ça d'un coup
+
+### docker images, build
 
 Je ne sais pas si c'est bien d'aller jusqu'à générer l'image docker (entrer dans le chroot, faire l'urpm m u et urpm u, vidanger le cache urpm, effacer /etc/syconfig/network, rebuilder la rmpdb peut être ? sortir du chroot faire le dockerfile, le tar de l'arborescence fraichement créée, et le docker build...
 
@@ -104,6 +109,14 @@ L'idée c'est que rapidement urpm puisse aussi tester des installs et builder de
 Ça instanciera un conteneur à partir de l'image de ref, avec un répretoire "partagé" pour la persistance, ça fera le urpm builddep et ensuite le bm/rpmbuild
 Et ça pourra aussi instancier un autre conteneur vierge pour tester le urpm i du fichier et valider que ça s'installe sans souci.
 Attention que le urpm dans son conteneur devra pouvoir tirer partie des peers dispos (et peut être même qu'il faudra prévoir un download prédictif sur la machine locale de façon à disposer au moins d'un peer avec toutes les dépendances nécessaires...
+
+urpm image build mga9 x86_64
+urpm image list
+urpm image delete <identifiant>
+
+urpm build
+
+urpm build <rpmfource.src.rpm>
 
 Et à la fin l'idée c'est que ça puisse même être effectué par urpmd, piloté via les API par un ordonnanceur pour faire du rebuild de masse parallélisé.
 

@@ -184,6 +184,21 @@ def create_parser() -> argparse.ArgumentParser:
         help='Disable colored output'
     )
 
+    parser.add_argument(
+        '--root',
+        type=str,
+        metavar='DIR',
+        help='Use DIR as root for RPM install (chroot). urpm config from host system.'
+    )
+
+    parser.add_argument(
+        '--urpm-root',
+        type=str,
+        metavar='DIR',
+        dest='urpm_root',
+        help='Use DIR as root for both urpm config and RPM install.'
+    )
+
     # Parent parser for display options (inherited by subparsers)
     display_parent = argparse.ArgumentParser(add_help=False)
     display_parent.add_argument(
@@ -229,7 +244,64 @@ def create_parser() -> argparse.ArgumentParser:
     # Store parents for use by subparsers
     parser._display_parent = display_parent
     parser._debug_parent = debug_parent
-    
+
+    # =========================================================================
+    # init - Initialize urpm setup (for bootstrap/chroot)
+    # =========================================================================
+    init_parser = subparsers.add_parser(
+        'init',
+        help='Initialize urpm setup (for bootstrap/chroot)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Initialize a new urpm setup with standard Mageia media.
+
+Used for creating chroot environments or bootstrapping new systems.
+
+Examples:
+  urpm --urpm-root /tmp/rootfs init --release 10
+  urpm --urpm-root /tmp/rootfs init --release cauldron --arch x86_64
+  urpm init --mirrorlist 'https://mirrors.mageia.org/api/mageia.10.x86_64.list'
+'''
+    )
+    init_parser.add_argument(
+        '--mirrorlist',
+        metavar='URL',
+        help='URL to fetch mirror list (auto-generated from --release if not provided)'
+    )
+    init_parser.add_argument(
+        '--arch',
+        metavar='ARCH',
+        help='Target architecture (default: current system)'
+    )
+    init_parser.add_argument(
+        '--release',
+        metavar='VERSION',
+        help='Target Mageia version (default: detect from mirrorlist URL or system)'
+    )
+    init_parser.add_argument(
+        '--auto', '-y',
+        action='store_true',
+        help='Non-interactive mode'
+    )
+    init_parser.add_argument(
+        '--no-sync',
+        action='store_true',
+        help='Do not sync media after adding (just configure)'
+    )
+
+    # =========================================================================
+    # cleanup - Unmount chroot filesystems
+    # =========================================================================
+    cleanup_parser = subparsers.add_parser(
+        'cleanup',
+        help='Unmount chroot filesystems (/dev, /proc)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Unmount filesystems mounted by 'urpm init' in a chroot.
+
+Examples:
+  urpm --urpm-root /tmp/rootfs cleanup
+'''
+    )
+
     # =========================================================================
     # install / i
     # =========================================================================
@@ -301,6 +373,56 @@ def create_parser() -> argparse.ArgumentParser:
         '--nodeps',
         action='store_true',
         help='Skip dependency resolution (use with --download-only)'
+    )
+
+    # =========================================================================
+    # download / dl - Download packages without installing
+    # =========================================================================
+    download_parser = subparsers.add_parser(
+        'download', aliases=['dl'],
+        help='Download packages to cache without installing',
+        parents=[display_parent, debug_parent]
+    )
+    download_parser.add_argument(
+        'packages', nargs='*',
+        help='Package names to download (optional with --builddeps)'
+    )
+    download_parser.add_argument(
+        '--release', '-r',
+        type=str,
+        help='Target release (e.g., 10, cauldron). Downloads for this release.'
+    )
+    download_parser.add_argument(
+        '--arch',
+        type=str,
+        help='Target architecture (default: host arch)'
+    )
+    download_parser.add_argument(
+        '--builddeps', '-b',
+        nargs='?',
+        const='AUTO',
+        metavar='SPEC_OR_SRPM',
+        help='Download build dependencies. Auto-detect .spec or specify path.'
+    )
+    download_parser.add_argument(
+        '--auto', '-y',
+        action='store_true',
+        help='No confirmation'
+    )
+    download_parser.add_argument(
+        '--without-recommends',
+        action='store_true',
+        help='Skip recommended packages'
+    )
+    download_parser.add_argument(
+        '--no-peers',
+        action='store_true',
+        help='Do not use P2P downloads from peers'
+    )
+    download_parser.add_argument(
+        '--nodeps',
+        action='store_true',
+        help='Download only specified packages, no dependencies'
     )
 
     # =========================================================================
@@ -955,6 +1077,49 @@ For legacy mode (non-Mageia URL with explicit name):
     media_seed_info.add_argument(
         'name',
         help='Media name'
+    )
+
+    # media autoconfig / auto / ac
+    media_autoconfig = media_subparsers.add_parser(
+        'autoconfig', aliases=['auto', 'ac'],
+        help='Auto-add official Mageia media for a release',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Auto-configure all official Mageia media for a release.
+
+Uses the official mirrorlist to discover mirrors and adds all standard media:
+- core/release, core/updates
+- nonfree/release, nonfree/updates
+- tainted/release, tainted/updates
+
+Examples:
+  urpm media autoconfig --release 10 --arch x86_64
+  urpm media autoconfig -r cauldron
+  urpm media ac -r 10   # Short form
+'''
+    )
+    media_autoconfig.add_argument(
+        '--release', '-r',
+        required=True,
+        help='Mageia release (e.g., 10, cauldron)'
+    )
+    media_autoconfig.add_argument(
+        '--arch',
+        help='Architecture (default: host architecture)'
+    )
+    media_autoconfig.add_argument(
+        '--dry-run', '-n',
+        action='store_true',
+        help='Show what would be added without making changes'
+    )
+    media_autoconfig.add_argument(
+        '--no-nonfree',
+        action='store_true',
+        help='Skip nonfree media'
+    )
+    media_autoconfig.add_argument(
+        '--no-tainted',
+        action='store_true',
+        help='Skip tainted media'
     )
 
     # =========================================================================
@@ -2161,6 +2326,511 @@ def _import_gpg_key(key_data: bytes) -> bool:
         os.unlink(tmp_path)
 
 
+# Standard Mageia media types (class/type combinations)
+STANDARD_MEDIA_TYPES = [
+    ('core', 'release'),
+    ('core', 'updates'),
+    ('nonfree', 'release'),
+    ('nonfree', 'updates'),
+    ('tainted', 'release'),
+    ('tainted', 'updates'),
+]
+
+
+def cmd_init(args, db: PackageDatabase) -> int:
+    """Initialize urpm setup with standard Mageia media from mirrorlist.
+
+    Creates database and adds all standard media (core, nonfree, tainted × release, updates)
+    using mirrors from the provided mirrorlist URL.
+    """
+    from . import colors
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError, HTTPError
+    from urllib.parse import urlparse
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import re
+    import time
+    import platform
+
+    mirrorlist_url = args.mirrorlist
+    version = getattr(args, 'release', None)
+    arch = getattr(args, 'arch', None) or platform.machine()
+
+    # If no mirrorlist but --release provided, auto-construct URL
+    if not mirrorlist_url:
+        if version:
+            mirrorlist_url = f"https://mirrors.mageia.org/api/mageia.{version}.{arch}.list"
+            print(f"Using mirrorlist: {mirrorlist_url}")
+        else:
+            print(colors.error("Either --mirrorlist or --release is required"))
+            print(colors.dim("Examples:"))
+            print(colors.dim("  urpm init --release 10"))
+            print(colors.dim("  urpm init --mirrorlist 'https://mirrors.mageia.org/api/mageia.10.x86_64.list'"))
+            return 1
+    elif not version or not arch:
+        # Try to extract version and arch from mirrorlist URL if not provided
+        # URL format: https://mirrors.mageia.org/api/mageia.10.x86_64.list
+        match = re.search(r'mageia\.([^.]+)\.([^.]+)\.list', mirrorlist_url)
+        if match:
+            if not version:
+                version = match.group(1)
+            if not arch:
+                arch = match.group(2)
+
+    # Fallback to system version if still not determined
+    if not version:
+        try:
+            with open('/etc/os-release') as f:
+                for line in f:
+                    if line.startswith('VERSION_ID='):
+                        version = line.strip().split('=')[1].strip('"')
+                        break
+        except (IOError, OSError):
+            pass
+
+    if not version:
+        print(colors.error("Cannot determine Mageia version"))
+        print(colors.dim("Use --release to specify (e.g., --release 10 or --release cauldron)"))
+        return 1
+
+    urpm_root = getattr(args, 'urpm_root', None)
+    if urpm_root:
+        print(f"Initializing urpm in {urpm_root}/var/lib/urpm/")
+        import subprocess
+        import os
+        import stat
+
+        # Prepare chroot filesystem structure
+        print("Preparing chroot filesystem...")
+        root_path = Path(urpm_root)
+
+        # Create essential directories
+        essential_dirs = [
+            'dev', 'dev/pts', 'dev/shm',
+            'proc', 'sys',
+            'etc', 'var/tmp', 'var/lib/rpm',
+            'run', 'tmp'
+        ]
+        for d in essential_dirs:
+            (root_path / d).mkdir(parents=True, exist_ok=True)
+
+        # Set proper permissions for /tmp and /var/tmp
+        (root_path / 'tmp').chmod(0o1777)
+        (root_path / 'var/tmp').chmod(0o1777)
+
+        # Check if filesystem supports device nodes (nodev mount option)
+        def is_nodev_filesystem(path: Path) -> bool:
+            """Check if path is on a filesystem mounted with nodev."""
+            try:
+                with open('/proc/mounts', 'r') as f:
+                    # Find the mount point for this path
+                    best_match = None
+                    best_len = 0
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            mount_point = parts[1]
+                            options = parts[3]
+                            # Check if this mount point is a prefix of our path
+                            try:
+                                if str(path.resolve()).startswith(mount_point):
+                                    if len(mount_point) > best_len:
+                                        best_len = len(mount_point)
+                                        best_match = options
+                            except (OSError, ValueError):
+                                pass
+                    if best_match and 'nodev' in best_match.split(','):
+                        return True
+            except (OSError, IOError):
+                pass
+            return False
+
+        # Bind mount /dev from host (works on any filesystem including nodev)
+        chroot_dev = root_path / 'dev'
+        dev_mounted = False
+
+        # Check if already mounted
+        def is_dev_mounted(chroot_dev: Path) -> bool:
+            try:
+                with open('/proc/mounts', 'r') as f:
+                    chroot_dev_str = str(chroot_dev.resolve())
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1] == chroot_dev_str:
+                            return True
+            except (OSError, IOError):
+                pass
+            return False
+
+        if not is_dev_mounted(chroot_dev):
+            if is_nodev_filesystem(root_path):
+                print("  Filesystem has nodev - bind mounting /dev from host...")
+            else:
+                print("  Bind mounting /dev from host...")
+
+            result = subprocess.run(
+                ['mount', '--bind', '/dev', str(chroot_dev)],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                dev_mounted = True
+                print(colors.dim(f"  (unmount with: umount {chroot_dev})"))
+            else:
+                print(colors.warning(f"  Failed to mount /dev: {result.stderr.strip()}"))
+                # Fall back to creating device nodes if mount failed
+                print("  Falling back to creating device nodes...")
+                old_umask = os.umask(0)
+                try:
+                    dev_nodes = [
+                        ('null', stat.S_IFCHR | 0o666, 1, 3),
+                        ('zero', stat.S_IFCHR | 0o666, 1, 5),
+                        ('random', stat.S_IFCHR | 0o666, 1, 8),
+                        ('urandom', stat.S_IFCHR | 0o666, 1, 9),
+                        ('console', stat.S_IFCHR | 0o600, 5, 1),
+                        ('tty', stat.S_IFCHR | 0o666, 5, 0),
+                    ]
+                    for name, mode, major, minor in dev_nodes:
+                        dev_path = root_path / 'dev' / name
+                        if not dev_path.exists():
+                            try:
+                                os.mknod(str(dev_path), mode, os.makedev(major, minor))
+                            except (PermissionError, OSError):
+                                pass
+                finally:
+                    os.umask(old_umask)
+        else:
+            print("  /dev already mounted")
+            dev_mounted = True
+
+        # Create /dev/fd symlink (only if not using bind mount)
+        fd_link = root_path / 'dev/fd'
+        if not dev_mounted and not fd_link.exists():
+            try:
+                fd_link.symlink_to('/proc/self/fd')
+            except OSError:
+                pass
+
+        # Create /dev/stdin, stdout, stderr symlinks (only if not using bind mount)
+        if not dev_mounted:
+            for i, name in enumerate(['stdin', 'stdout', 'stderr']):
+                link_path = root_path / 'dev' / name
+                if not link_path.exists():
+                    try:
+                        link_path.symlink_to(f'/proc/self/fd/{i}')
+                    except OSError:
+                        pass
+
+        # Mount /proc (needed by many scriptlets)
+        chroot_proc = root_path / 'proc'
+        def is_proc_mounted(chroot_proc: Path) -> bool:
+            try:
+                with open('/proc/mounts', 'r') as f:
+                    chroot_proc_str = str(chroot_proc.resolve())
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1] == chroot_proc_str:
+                            return True
+            except (OSError, IOError):
+                pass
+            return False
+
+        if not is_proc_mounted(chroot_proc):
+            print("  Mounting /proc...")
+            result = subprocess.run(
+                ['mount', '-t', 'proc', 'proc', str(chroot_proc)],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                print(colors.dim(f"  (unmount with: umount {chroot_proc})"))
+            else:
+                print(colors.warning(f"  Failed to mount /proc: {result.stderr.strip()}"))
+        else:
+            print("  /proc already mounted")
+
+        # Create /etc/mtab symlink to /proc/mounts
+        mtab_link = root_path / 'etc/mtab'
+        if not mtab_link.exists():
+            try:
+                mtab_link.symlink_to('/proc/mounts')
+            except OSError:
+                pass
+
+        # Copy /etc/resolv.conf for DNS resolution
+        resolv_src = Path('/etc/resolv.conf')
+        resolv_dst = root_path / 'etc/resolv.conf'
+        if resolv_src.exists() and not resolv_dst.exists():
+            try:
+                import shutil
+                shutil.copy2(str(resolv_src), str(resolv_dst))
+            except (OSError, IOError):
+                pass
+
+        # Initialize empty rpmdb in the chroot
+        rpmdb_dir = root_path / "var/lib/rpm"
+        print(f"Initializing rpmdb...")
+        result = subprocess.run(
+            ['rpm', '--root', urpm_root, '--initdb'],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(colors.error(f"Failed to initialize rpmdb: {result.stderr}"))
+            return 1
+
+        # Import Mageia GPG key into the chroot
+        print(f"Importing Mageia GPG key...")
+        # Try to copy host's Mageia key to chroot
+        key_paths = [
+            '/etc/pki/rpm-gpg/RPM-GPG-KEY-Mageia',
+            '/usr/share/distribution-gpg-keys/mageia/RPM-GPG-KEY-Mageia'
+        ]
+        key_imported = False
+        for key_path in key_paths:
+            if Path(key_path).exists():
+                result = subprocess.run(
+                    ['rpm', '--root', urpm_root, '--import', key_path],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    print(f"  Imported key from {key_path}")
+                    key_imported = True
+                    break
+        if not key_imported:
+            print(colors.warning("  Could not import GPG key (use --nosignature if needed)"))
+    else:
+        print(f"Initializing urpm for Mageia {version} ({arch})")
+
+    # Check if media already exist
+    existing_media = db.list_media()
+    if existing_media:
+        print(colors.warning(f"Warning: {len(existing_media)} media already configured"))
+        auto = getattr(args, 'auto', False)
+        if not auto:
+            try:
+                response = input("Continue and add more? [y/N] ")
+                if response.lower() not in ('y', 'yes'):
+                    print("Aborted")
+                    return 1
+            except (KeyboardInterrupt, EOFError):
+                print("\nAborted")
+                return 1
+
+    # Fetch mirrorlist
+    print(f"Fetching mirrorlist...", end=' ', flush=True)
+
+    try:
+        req = Request(mirrorlist_url, headers={'User-Agent': 'urpm/0.1'})
+        with urlopen(req, timeout=60) as response:
+            content = response.read().decode('utf-8').strip()
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+    except (URLError, HTTPError) as e:
+        print(colors.error(f"failed: {e}"))
+        return 1
+
+    if not lines:
+        print(colors.warning("empty"))
+        print(colors.dim("The mirrorlist may not be available yet for this version."))
+        return 1
+
+    # Parse mirrorlist format: key=value,key=value,...,url=https://...
+    # Example: continent=EU,zone=FR,...,url=https://ftp.belnet.be/mageia/distrib/10/x86_64
+    mirror_urls = []
+    for line in lines:
+        # Extract url= field from CSV-like format
+        for field in line.split(','):
+            if field.startswith('url='):
+                mirror_urls.append(field[4:])  # Remove 'url=' prefix
+                break
+
+    print(f"{len(mirror_urls)} mirrors")
+
+    if not mirror_urls:
+        print(colors.warning("No URLs found in mirrorlist"))
+        return 1
+
+    # Parse mirror URLs to extract base paths
+    # Mirror URLs look like: https://ftp.belnet.be/mageia/distrib/10/x86_64
+    # We need to extract the base: https://ftp.belnet.be/mageia/distrib/
+    # The suffix to strip is: {version}/{arch}
+    suffix_pattern = re.compile(rf'{re.escape(version)}/{re.escape(arch)}/?$')
+
+    candidates = []
+    for url in mirror_urls:
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            continue
+
+        # Extract base path by stripping the suffix
+        base_path = suffix_pattern.sub('', parsed.path).rstrip('/')
+
+        candidates.append({
+            'scheme': parsed.scheme,
+            'host': parsed.hostname,
+            'base_path': base_path,
+            'full_url': url,
+        })
+
+    if not candidates:
+        print(colors.error("No valid HTTP/HTTPS mirrors found"))
+        return 1
+
+    # Test latency to find best mirrors
+    print(f"Testing latency to {len(candidates)} mirrors...", end=' ', flush=True)
+
+    def test_latency(candidate):
+        test_url = candidate['full_url']
+        try:
+            start = time.time()
+            req = Request(test_url, method='HEAD')
+            with urlopen(req, timeout=5) as resp:
+                latency = (time.time() - start) * 1000
+                return (candidate, latency)
+        except Exception:
+            return (candidate, None)
+
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(test_latency, c): c for c in candidates}
+        for future in as_completed(futures):
+            candidate, latency = future.result()
+            if latency is not None:
+                results.append((candidate, latency))
+
+    print(f"{len(results)} reachable")
+
+    if not results:
+        print(colors.error("No reachable mirrors found"))
+        return 1
+
+    # Sort by latency and take best 3
+    results.sort(key=lambda x: x[1])
+    best_mirrors = results[:3]
+
+    print(f"\nBest mirrors:")
+    for candidate, latency in best_mirrors:
+        print(f"  {candidate['host']} ({latency:.0f}ms)")
+
+    # Add servers
+    print(f"\nAdding servers...")
+    servers_added = []
+
+    for candidate, latency in best_mirrors:
+        # Check if server already exists
+        existing = db.get_server_by_location(
+            candidate['scheme'],
+            candidate['host'],
+            candidate['base_path']
+        )
+        if existing:
+            print(f"  {candidate['host']}: already exists")
+            servers_added.append(existing)
+            continue
+
+        # Generate server name from hostname
+        server_name = _generate_server_name(candidate['scheme'], candidate['host'])
+
+        # Make name unique if needed
+        base_name = server_name
+        counter = 1
+        while True:
+            try:
+                server_id = db.add_server(
+                    name=server_name,
+                    protocol=candidate['scheme'],
+                    host=candidate['host'],
+                    base_path=candidate['base_path'],
+                    is_official=True,
+                    enabled=True,
+                    priority=50
+                )
+                print(f"  {server_name} (id={server_id})")
+                servers_added.append({'id': server_id, 'name': server_name})
+                break
+            except Exception as e:
+                if 'UNIQUE constraint' in str(e) and 'name' in str(e):
+                    counter += 1
+                    server_name = f"{base_name}-{counter}"
+                else:
+                    print(colors.error(f"  Failed to add {candidate['host']}: {e}"))
+                    break
+
+    if not servers_added:
+        print(colors.error("No servers could be added"))
+        return 1
+
+    # Add standard media
+    print(f"\nAdding standard media for Mageia {version} ({arch})...")
+    media_added = []
+
+    for media_class, media_type in STANDARD_MEDIA_TYPES:
+        name = f"{media_class.capitalize()} {media_type.capitalize()}"
+        short_name = f"{media_class}_{media_type}"
+        relative_path = f"{version}/{arch}/media/{media_class}/{media_type}"
+        is_update = (media_type == 'updates')
+
+        # Check if media already exists
+        existing = db.get_media_by_version_arch_shortname(version, arch, short_name)
+        if existing:
+            print(f"  {name}: already exists")
+            media_added.append(existing)
+            continue
+
+        try:
+            media_id = db.add_media(
+                name=name,
+                short_name=short_name,
+                mageia_version=version,
+                architecture=arch,
+                relative_path=relative_path,
+                is_official=True,
+                allow_unsigned=False,
+                enabled=True,
+                update_media=is_update,
+                priority=50,
+                url=None
+            )
+            print(f"  {name} (id={media_id})")
+            media_added.append({'id': media_id, 'name': name, 'short_name': short_name})
+        except Exception as e:
+            print(colors.error(f"  Failed to add {name}: {e}"))
+
+    if not media_added:
+        print(colors.error("No media could be added"))
+        return 1
+
+    # Link servers to media
+    print(f"\nLinking servers to media...")
+    for server in servers_added:
+        for media in media_added:
+            if not db.server_media_link_exists(server['id'], media['id']):
+                db.link_server_media(server['id'], media['id'])
+
+    print(colors.success(f"\nInitialized with {len(servers_added)} server(s) and {len(media_added)} media"))
+
+    # Sync media unless --no-sync
+    if not getattr(args, 'no_sync', False):
+        print(f"\nSyncing media metadata...")
+        # Trigger sync for all media
+        for media in media_added:
+            media_name = media.get('name', '')
+            short_name = media.get('short_name', media_name)
+            print(f"  Syncing {short_name}...", end=' ', flush=True)
+            try:
+                from ..core.sync import sync_media
+                result = sync_media(db, media_name, urpm_root=urpm_root)
+                if result.success:
+                    print(f"{result.packages_count} packages")
+                else:
+                    print(colors.warning(f"failed: {result.error or 'unknown'}"))
+            except Exception as e:
+                print(colors.warning(f"failed: {e}"))
+
+    print(colors.success("\nDone! You can now install packages."))
+    if urpm_root:
+        print(colors.dim(f"Example: urpm --urpm-root {urpm_root} --root {urpm_root} install basesystem-minimal"))
+
+    return 0
+
+
 def cmd_media_add(args, db: PackageDatabase) -> int:
     """Handle media add command.
 
@@ -2442,7 +3112,8 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
         def single_progress(stage, current, total):
             progress(args.name, stage, current, total)
 
-        result = sync_media(db, args.name, single_progress, force=True)
+        urpm_root = getattr(args, 'urpm_root', None)
+        result = sync_media(db, args.name, single_progress, force=True, urpm_root=urpm_root)
         print()  # newline after progress
 
         if result.success:
@@ -2993,6 +3664,211 @@ def cmd_media_seed_info(args, db: PackageDatabase) -> int:
     # Show some examples
     if matching:
         print(f"\nExample seed packages: {', '.join(sorted(matching)[:10])}...")
+
+    return 0
+
+
+def cmd_media_autoconfig(args, db: PackageDatabase) -> int:
+    """Handle media autoconfig command - auto-add official Mageia media for a release."""
+    from . import colors
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError, HTTPError
+    from urllib.parse import urlparse
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import platform
+    import time
+    import re
+
+    # Get release and arch
+    release = args.release
+    arch = getattr(args, 'arch', None) or platform.machine()
+    dry_run = getattr(args, 'dry_run', False)
+    no_nonfree = getattr(args, 'no_nonfree', False)
+    no_tainted = getattr(args, 'no_tainted', False)
+
+    print(f"Auto-configuring media for Mageia {release} ({arch})")
+
+    # Define media types to add
+    # Format: (type, repo, name_suffix)
+    media_types = [
+        ('core', 'release', 'Core Release'),
+        ('core', 'updates', 'Core Updates'),
+    ]
+    if not no_nonfree:
+        media_types.extend([
+            ('nonfree', 'release', 'Nonfree Release'),
+            ('nonfree', 'updates', 'Nonfree Updates'),
+        ])
+    if not no_tainted:
+        media_types.extend([
+            ('tainted', 'release', 'Tainted Release'),
+            ('tainted', 'updates', 'Tainted Updates'),
+        ])
+
+    # Fetch mirrorlist to get a good server
+    # Format: key=value,key=value,...,url=<url>
+    mirrorlist_url = f"https://mirrors.mageia.org/api/mageia.{release}.{arch}.list"
+    print(f"Fetching mirrorlist from {mirrorlist_url}...", end=' ', flush=True)
+
+    try:
+        req = Request(mirrorlist_url)
+        req.add_header('User-Agent', 'urpm-ng')
+        with urlopen(req, timeout=30) as response:
+            content = response.read().decode('utf-8').strip()
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+    except (URLError, HTTPError) as e:
+        print(colors.error(f"failed: {e}"))
+        return 1
+
+    if not lines:
+        print(colors.warning("empty mirrorlist"))
+        return 1
+
+    # Parse mirrorlist format: continent=XX,zone=XX,...,url=<url>
+    mirror_urls = []
+    for line in lines:
+        # Extract url= field
+        url_match = re.search(r'url=(.+)$', line)
+        if url_match:
+            url = url_match.group(1)
+            # Only keep http/https
+            if url.startswith('http://') or url.startswith('https://'):
+                mirror_urls.append(url)
+
+    if not mirror_urls:
+        print(colors.warning("no http/https mirrors found"))
+        return 1
+
+    print(f"{len(mirror_urls)} http(s) mirrors")
+
+    # Test a few mirrors to find a fast one
+    print("Testing mirror latency...", end=' ', flush=True)
+
+    def test_mirror(url):
+        """Test mirror latency by fetching a small file."""
+        try:
+            # URL is like: https://host/path/distrib/<release>/<arch>
+            # Append /media/core/release/ and test with HEAD
+            test_url = url.rstrip('/') + '/media/core/release/'
+            req = Request(test_url, method='HEAD')
+            req.add_header('User-Agent', 'urpm-ng')
+            start = time.time()
+            with urlopen(req, timeout=5) as response:
+                latency = time.time() - start
+                return (latency, url)
+        except Exception:
+            return (float('inf'), url)
+
+    # Test first 15 mirrors (prefer https)
+    https_mirrors = [u for u in mirror_urls if u.startswith('https://')]
+    http_mirrors = [u for u in mirror_urls if u.startswith('http://') and not u.startswith('https://')]
+    test_urls = (https_mirrors[:10] + http_mirrors[:5])[:15]
+
+    latencies = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(test_mirror, url): url for url in test_urls}
+        for future in as_completed(futures):
+            result = future.result()
+            if result[0] < float('inf'):
+                latencies.append(result)
+
+    if not latencies:
+        print(colors.warning("all mirrors unreachable"))
+        return 1
+
+    # Sort by latency and pick top 3
+    latencies.sort(key=lambda x: x[0])
+    best_mirrors = latencies[:3]
+    print(f"best: {best_mirrors[0][0]*1000:.0f}ms")
+
+    # Extract base URL from mirror URL
+    # Mirror URL format: https://mirror.example.com/path/distrib/<release>/<arch>
+    # We need: https://mirror.example.com/path/distrib/
+    def extract_base_url(mirror_url, release, arch):
+        """Extract base URL from distrib URL."""
+        # Pattern to match and remove: /<release>/<arch> at the end
+        pattern = rf'/{re.escape(str(release))}/{re.escape(arch)}/?$'
+        base = re.sub(pattern, '', mirror_url).rstrip('/')
+        return base
+
+    # Check existing media to avoid duplicates
+    existing_media = db.list_media()
+    existing_names = {m['name'] for m in existing_media}
+
+    # Add media
+    added = 0
+    skipped = 0
+
+    # First, add servers from best mirrors
+    server_added = False
+    for latency, mirror_url in best_mirrors[:1]:  # Just use the best one
+        base_url = extract_base_url(mirror_url, release, arch)
+        parsed = urlparse(base_url)
+        server_name = parsed.hostname
+
+        # Check if server already exists
+        existing_server = db.get_server(server_name)
+        if not existing_server:
+            if dry_run:
+                print(f"  Would add server: {server_name} ({base_url})")
+            else:
+                db.add_server(
+                    name=server_name,
+                    protocol=parsed.scheme,
+                    host=parsed.hostname,
+                    base_path=parsed.path
+                )
+                print(f"  Added server: {server_name}")
+            server_added = True
+
+    # Add each media type
+    for media_type, repo, name_suffix in media_types:
+        # Media name: e.g., "mga10-core-release" or "mga10-x86_64-core-release" for non-host arch
+        if arch == platform.machine():
+            media_name = f"mga{release}-{media_type}-{repo}"
+        else:
+            media_name = f"mga{release}-{arch}-{media_type}-{repo}"
+
+        if media_name in existing_names:
+            print(f"  Skipping {media_name} (already exists)")
+            skipped += 1
+            continue
+
+        # Relative path for this media: <release>/<arch>/media/<type>/<repo>/
+        relative_path = f"{release}/{arch}/media/{media_type}/{repo}"
+
+        if dry_run:
+            print(f"  Would add media: {media_name} -> {relative_path}")
+        else:
+            # Add the media
+            db.add_media(
+                name=media_name,
+                relative_path=relative_path,
+                is_official=True,
+                mageia_version=str(release),
+                architecture=arch
+            )
+            print(f"  Added media: {media_name}")
+
+            # Link media to server
+            if server_added:
+                parsed = urlparse(best_mirrors[0][1])
+                server = db.get_server(parsed.hostname)
+                if server:
+                    media = db.get_media(media_name)
+                    if media:
+                        db.link_media_to_server(media['id'], server['id'])
+
+        added += 1
+
+    # Summary
+    print()
+    if dry_run:
+        print(colors.warning(f"Dry run: would add {added} media, {skipped} already exist"))
+    else:
+        print(colors.success(f"Added {added} media, {skipped} already existed"))
+        if added > 0:
+            print(colors.dim("Run 'urpm update' to sync metadata"))
 
     return 0
 
@@ -3970,7 +4846,9 @@ def cmd_mirror_sync(args, db: PackageDatabase) -> int:
     print(f"Downloading {len(download_items)} packages...")
 
     # Use parallel downloader (same as urpm i/u)
-    downloader = Downloader(use_peers=False, db=db)
+    from ..core.config import get_base_dir
+    cache_dir = get_base_dir(urpm_root=getattr(args, 'urpm_root', None))
+    downloader = Downloader(cache_dir=cache_dir, use_peers=False, db=db)
 
     # Multi-line progress display using DownloadProgressDisplay
     from . import display
@@ -4185,10 +5063,11 @@ def cmd_cache_rebuild(args, db: PackageDatabase) -> int:
     enabled_media = [m for m in media_list if m['enabled']]
     print(f"Re-importing {len(enabled_media)} enabled media...")
 
+    urpm_root = getattr(args, 'urpm_root', None)
     for media in enabled_media:
         print(f"\n  {media['name']}...", end='', flush=True)
         try:
-            result = sync_media(db, media['name'], force=True)
+            result = sync_media(db, media['name'], force=True, urpm_root=urpm_root)
             if result.success:
                 print(f" {result.packages_count:,} packages")
             else:
@@ -4728,6 +5607,94 @@ def _resolve_with_alternatives(resolver, packages: list, choices: dict,
     return result, False
 
 
+def _create_resolver(db: 'PackageDatabase', args, **kwargs) -> 'Resolver':
+    """Create a Resolver with root options from args.
+
+    Args:
+        db: Package database
+        args: Parsed arguments (may contain root, urpm_root)
+        **kwargs: Additional arguments to pass to Resolver
+
+    Returns:
+        Configured Resolver instance
+    """
+    from ..core.resolver import Resolver
+    import platform
+
+    # Get root options from args
+    root = getattr(args, 'root', None)
+    urpm_root = getattr(args, 'urpm_root', None)
+
+    # Default arch if not provided
+    if 'arch' not in kwargs:
+        kwargs['arch'] = platform.machine()
+
+    return Resolver(db, root=root, urpm_root=urpm_root, **kwargs)
+
+
+def cmd_cleanup(args, db: PackageDatabase) -> int:
+    """Handle cleanup command - unmount chroot filesystems."""
+    import subprocess
+    from pathlib import Path
+    from . import colors
+
+    urpm_root = getattr(args, 'urpm_root', None)
+    if not urpm_root:
+        print(colors.error("Error: --urpm-root is required for cleanup"))
+        return 1
+
+    root_path = Path(urpm_root)
+    if not root_path.exists():
+        print(colors.error(f"Error: {urpm_root} does not exist"))
+        return 1
+
+    print(f"Cleaning up mounts in {urpm_root}...")
+
+    # Unmount in reverse order (most nested first)
+    mounts_to_check = [
+        root_path / 'dev/pts',
+        root_path / 'dev/shm',
+        root_path / 'dev/mqueue',
+        root_path / 'dev/hugepages',
+        root_path / 'proc',
+        root_path / 'sys',
+        root_path / 'dev',
+    ]
+
+    def is_mounted(path: Path) -> bool:
+        """Check if path is a mount point."""
+        try:
+            with open('/proc/mounts', 'r') as f:
+                path_str = str(path.resolve())
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1] == path_str:
+                        return True
+        except (OSError, IOError):
+            pass
+        return False
+
+    unmounted = 0
+    for mount_path in mounts_to_check:
+        if mount_path.exists() and is_mounted(mount_path):
+            result = subprocess.run(
+                ['umount', str(mount_path)],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                print(f"  Unmounted {mount_path}")
+                unmounted += 1
+            else:
+                print(colors.warning(f"  Failed to unmount {mount_path}: {result.stderr.strip()}"))
+
+    if unmounted == 0:
+        print("  No mounts to clean up")
+    else:
+        print(colors.success(f"  {unmounted} filesystem(s) unmounted"))
+
+    return 0
+
+
 def cmd_install(args, db: PackageDatabase) -> int:
     """Handle install command."""
     import signal
@@ -4861,7 +5828,7 @@ def cmd_install(args, db: PackageDatabase) -> int:
     else:
         initial_recommends = not without_recommends
 
-    resolver = Resolver(db, install_recommends=initial_recommends)
+    resolver = _create_resolver(db, args, install_recommends=initial_recommends)
     # choices dict was initialized earlier (line ~4818) with virtual package resolutions
 
     # Add local RPMs to resolver pool before resolution
@@ -5178,7 +6145,7 @@ def cmd_install(args, db: PackageDatabase) -> int:
         need_reresolve = True
 
     if need_reresolve:
-        resolver = Resolver(db, install_recommends=install_recommends_final)
+        resolver = _create_resolver(db, args, install_recommends=install_recommends_final)
         if local_rpm_infos:
             resolver.add_local_rpms(local_rpm_infos)
         result, aborted = _resolve_with_alternatives(
@@ -5206,7 +6173,7 @@ def cmd_install(args, db: PackageDatabase) -> int:
                 retry_packages = resolved_packages + remaining_suggests
 
                 # Retry resolution
-                resolver = Resolver(db, install_recommends=install_recommends_final)
+                resolver = _create_resolver(db, args, install_recommends=install_recommends_final)
                 if local_rpm_infos:
                     resolver.add_local_rpms(local_rpm_infos)
                 result, aborted = _resolve_with_alternatives(
@@ -5397,7 +6364,9 @@ def cmd_install(args, db: PackageDatabase) -> int:
     if download_items:
         print(colors.info("\nDownloading packages..."))
         use_peers = not getattr(args, 'no_peers', False)
-        downloader = Downloader(use_peers=use_peers, db=db)
+        from ..core.config import get_base_dir
+        cache_dir = get_base_dir(urpm_root=getattr(args, 'urpm_root', None))
+        downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, db=db)
 
         # Multi-line progress display using DownloadProgressDisplay
         from . import display
@@ -5518,7 +6487,10 @@ def cmd_install(args, db: PackageDatabase) -> int:
         test_mode = getattr(args, 'test', False)
 
         # Build transaction queue
-        queue = TransactionQueue()
+        # Get root for chroot installation
+        from ..core.config import get_rpm_root
+        rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
+        queue = TransactionQueue(root=rpm_root or "/")
         queue.add_install(
             rpm_paths,
             operation_id="install",
@@ -5583,6 +6555,292 @@ def cmd_install(args, db: PackageDatabase) -> int:
         signal.signal(signal.SIGINT, original_handler)
 
 
+def cmd_download(args, db: PackageDatabase) -> int:
+    """Handle download command - download packages without installing.
+
+    Downloads packages and their dependencies to the local cache.
+    Uses ignore_installed=True to resolve all dependencies, even if already installed.
+    """
+    import time
+    import platform
+    from pathlib import Path
+
+    from ..core.resolver import Resolver, Resolution, format_size, set_solver_debug, PackageAction
+    from ..core.download import Downloader, DownloadItem
+    from ..core.config import get_base_dir
+    from . import colors
+
+    # Set up solver debug if requested
+    debug_solver = getattr(args, 'debug', None) in ('solver', 'all')
+    watched_pkgs = getattr(args, 'watched', None)
+    if watched_pkgs:
+        watched_pkgs = [p.strip() for p in watched_pkgs.split(',')]
+    if debug_solver or watched_pkgs:
+        set_solver_debug(enabled=debug_solver, watched=watched_pkgs)
+
+    # Collect packages to download
+    packages = list(args.packages) if args.packages else []
+
+    # Handle --builddeps option
+    builddeps = getattr(args, 'builddeps', None)
+    if builddeps:
+        from ..core.buildrequires import get_buildrequires, list_specs_in_workdir
+
+        try:
+            if builddeps == 'AUTO':
+                # Auto-detect mode
+                specs = list_specs_in_workdir()
+                if len(specs) > 1:
+                    # Multiple specs found - ask user
+                    print(colors.info("Multiple .spec files found:"))
+                    for i, spec in enumerate(specs, 1):
+                        print(f"  {i}. {spec.name}")
+                    if getattr(args, 'auto', False):
+                        print(colors.error("Error: Multiple .spec files found. Specify which one to use."))
+                        return 1
+                    try:
+                        choice = input("Select spec file (number): ").strip()
+                        idx = int(choice) - 1
+                        if 0 <= idx < len(specs):
+                            builddeps = str(specs[idx])
+                        else:
+                            print(colors.error("Invalid choice"))
+                            return 1
+                    except (ValueError, KeyboardInterrupt):
+                        print("\nAborted.")
+                        return 1
+                else:
+                    builddeps = 'AUTO'  # Let get_buildrequires handle it
+
+            target = None if builddeps == 'AUTO' else builddeps
+            reqs, source = get_buildrequires(target)
+            print(colors.info(f"Build dependencies from: {source}"))
+            print(f"  Found {len(reqs)} BuildRequires")
+            packages.extend(reqs)
+
+        except FileNotFoundError as e:
+            print(colors.error(f"Error: {e}"))
+            return 1
+        except ValueError as e:
+            print(colors.error(f"Error: {e}"))
+            return 1
+
+    if not packages:
+        print(colors.error("Error: No packages specified"))
+        print("Usage: urpm download [packages...] [--builddeps [spec]]")
+        return 1
+
+    # Get target release/arch
+    target_release = getattr(args, 'release', None)
+    target_arch = getattr(args, 'arch', None) or platform.machine()
+
+    # Get CLI options
+    without_recommends = getattr(args, 'without_recommends', False)
+    nodeps = getattr(args, 'nodeps', False)
+    auto_mode = getattr(args, 'auto', False)
+
+    # Show what we're downloading
+    print(colors.info(f"\nResolving packages for download..."))
+    if target_release:
+        print(f"  Target release: {target_release}")
+    print(f"  Target arch: {target_arch}")
+    print(f"  Packages: {', '.join(packages[:5])}" + (f" ... (+{len(packages)-5} more)" if len(packages) > 5 else ""))
+
+    # Create resolver with ignore_installed=True (resolves all deps)
+    resolver = _create_resolver(
+        db, args,
+        arch=target_arch,
+        install_recommends=not without_recommends,
+        ignore_installed=True
+    )
+
+    if nodeps:
+        # --nodeps: download only specified packages, no dependency resolution
+        from ..core.resolver import PackageAction, TransactionType, Resolution, InstallReason
+        actions = []
+        not_found = []
+
+        for pkg_spec in packages:
+            # Clean package name (remove version constraints for lookup)
+            pkg_name = pkg_spec.split()[0] if ' ' in pkg_spec else pkg_spec
+            pkg = db.get_package_smart(pkg_name)
+            if not pkg:
+                not_found.append(pkg_spec)
+                continue
+
+            media = db.get_media_by_id(pkg['media_id'])
+            media_name = media.get('name', 'unknown') if media else 'unknown'
+            epoch = pkg.get('epoch', 0) or 0
+            evr = f"{epoch}:{pkg['version']}-{pkg['release']}" if epoch else f"{pkg['version']}-{pkg['release']}"
+            actions.append(PackageAction(
+                action=TransactionType.INSTALL,
+                name=pkg['name'],
+                evr=evr,
+                arch=pkg['arch'],
+                nevra=pkg['nevra'],
+                size=pkg.get('size', 0) or 0,
+                media_name=media_name,
+                reason=InstallReason.EXPLICIT
+            ))
+
+        if not_found:
+            print(colors.error(f"Packages not found ({len(not_found)}):"))
+            for p in not_found[:10]:
+                print(f"  {p}")
+            if len(not_found) > 10:
+                print(f"  ... and {len(not_found) - 10} more")
+            return 1
+
+        result = Resolution(success=True, actions=actions, problems=[])
+    else:
+        # Normal resolution with alternatives handling
+        result, aborted = _resolve_with_alternatives(resolver, packages, {}, auto_mode)
+        if aborted:
+            return 1
+
+    if not result.success:
+        print(colors.error("Resolution failed:"))
+        for p in result.problems:
+            print(f"  {p}")
+        return 1
+
+    # Filter to only install actions
+    install_actions = [a for a in result.actions if a.action.name in ('INSTALL', 'UPGRADE', 'DOWNGRADE')]
+
+    if not install_actions:
+        print(colors.success("Nothing to download - all packages already available."))
+        return 0
+
+    # Calculate total size
+    total_size = sum(a.size for a in install_actions if a.size)
+
+    # Show summary
+    print(colors.info(f"\nPackages to download ({len(install_actions)}):"))
+    for action in install_actions[:20]:
+        size_str = format_size(action.size) if action.size else "?"
+        print(f"  {action.nevra} ({size_str})")
+    if len(install_actions) > 20:
+        print(f"  ... and {len(install_actions) - 20} more")
+    print(f"\nTotal download size: {format_size(total_size)}")
+
+    # Confirm unless --auto
+    if not auto_mode:
+        try:
+            confirm = input("\nProceed with download? [Y/n] ").strip().lower()
+            if confirm and confirm not in ('y', 'yes', 'o', 'oui'):
+                print("Aborted.")
+                return 0
+        except KeyboardInterrupt:
+            print("\nAborted.")
+            return 0
+
+    # Build download items
+    download_items = []
+    media_cache = {}
+    servers_cache = {}
+
+    for action in install_actions:
+        media_name = action.media_name
+        if media_name not in media_cache:
+            media = db.get_media(media_name)
+            media_cache[media_name] = media
+            if media and media.get('id'):
+                servers_cache[media['id']] = db.get_servers_for_media(
+                    media['id'], enabled_only=True
+                )
+
+        media = media_cache[media_name]
+        if not media:
+            print(f"  Warning: media '{media_name}' not found")
+            continue
+
+        # Parse EVR
+        evr = action.evr
+        if ':' in evr:
+            evr = evr.split(':', 1)[1]
+        version, release = evr.rsplit('-', 1) if '-' in evr else (evr, '1')
+
+        if media.get('relative_path'):
+            servers = servers_cache.get(media['id'], [])
+            servers = [dict(s) for s in servers]
+            download_items.append(DownloadItem(
+                name=action.name,
+                version=version,
+                release=release,
+                arch=action.arch,
+                media_id=media['id'],
+                relative_path=media['relative_path'],
+                is_official=bool(media.get('is_official', 1)),
+                servers=servers,
+                media_name=media_name,
+                size=action.size
+            ))
+        elif media.get('url'):
+            download_items.append(DownloadItem(
+                name=action.name,
+                version=version,
+                release=release,
+                arch=action.arch,
+                media_url=media['url'],
+                media_name=media_name,
+                size=action.size
+            ))
+        else:
+            print(f"  Warning: no URL or servers for media '{media_name}'")
+
+    if not download_items:
+        print(colors.error("No packages to download"))
+        return 1
+
+    # Download packages
+    print(colors.info("\nDownloading packages..."))
+    use_peers = not getattr(args, 'no_peers', False)
+    cache_dir = get_base_dir(urpm_root=getattr(args, 'urpm_root', None))
+    downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, db=db)
+
+    # Progress display
+    from . import display
+    progress_display = display.DownloadProgressDisplay(num_workers=4)
+
+    def progress(name, pkg_num, pkg_total, bytes_done, bytes_total,
+                 item_bytes=None, item_total=None, slots_status=None):
+        global_speed = 0.0
+        if slots_status:
+            for slot, prog in slots_status:
+                if prog is not None:
+                    global_speed += prog.get_speed()
+        progress_display.update(
+            pkg_num, pkg_total, bytes_done, bytes_total,
+            slots_status or [], global_speed
+        )
+
+    download_start = time.time()
+    dl_results, downloaded, cached, peer_stats = downloader.download_all(download_items, progress)
+    download_elapsed = time.time() - download_start
+    progress_display.finish()
+
+    # Check for failures
+    failed = [r for r in dl_results if not r.success]
+    if failed:
+        print(colors.error(f"\n{len(failed)} download(s) failed:"))
+        for r in failed[:5]:
+            print(f"  {colors.error(r.item.name)}: {r.error}")
+        return 1
+
+    # Summary
+    from_peers = peer_stats.get('from_peers', 0)
+    from_upstream = peer_stats.get('from_upstream', 0)
+    time_str = display.format_duration(download_elapsed)
+
+    print(f"\n{colors.success('Download complete')}:")
+    print(f"  {downloaded} downloaded, {cached} from cache in {time_str}")
+    if from_peers > 0:
+        print(f"  P2P: {from_peers} from peers, {from_upstream} from upstream")
+
+    print(colors.success(f"\nPackages saved to cache. Use 'urpm install' to install them."))
+    return 0
+
+
 def cmd_erase(args, db: PackageDatabase) -> int:
     """Handle erase (remove) command."""
     import platform
@@ -5626,8 +6884,7 @@ def cmd_erase(args, db: PackageDatabase) -> int:
         return 1
 
     # Resolve what to remove
-    arch = platform.machine()
-    resolver = Resolver(db, arch=arch)
+    resolver = _create_resolver(db, args)
     result = resolver.resolve_remove(args.packages, clean_deps=False)
 
     if not result.success:
@@ -5792,7 +7049,9 @@ def cmd_erase(args, db: PackageDatabase) -> int:
         test_mode = getattr(args, 'test', False)
 
         # Build transaction queue
-        queue = TransactionQueue()
+        from ..core.config import get_rpm_root
+        rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
+        queue = TransactionQueue(root=rpm_root or "/")
         queue.add_erase(
             packages_to_erase,
             operation_id="erase",
@@ -5954,9 +7213,8 @@ def cmd_update(args, db: PackageDatabase) -> int:
     # Resolve upgrades
     # For upgrades, don't install recommends by default (unlike install)
     # This matches urpmi --auto-update behavior
-    arch = platform.machine()
     install_recommends = getattr(args, 'with_recommends', False)
-    resolver = Resolver(db, arch=arch, install_recommends=install_recommends)
+    resolver = _create_resolver(db, args, install_recommends=install_recommends)
 
     # Add local RPMs to resolver pool before resolution
     if local_rpm_infos:
@@ -6110,7 +7368,9 @@ def cmd_update(args, db: PackageDatabase) -> int:
 
         # Download
         use_peers = not getattr(args, 'no_peers', False)
-        downloader = Downloader(use_peers=use_peers, db=db)
+        from ..core.config import get_base_dir
+        cache_dir = get_base_dir(urpm_root=getattr(args, 'urpm_root', None))
+        downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, db=db)
 
         # Multi-line progress display using DownloadProgressDisplay
         from . import display
@@ -6197,7 +7457,9 @@ def cmd_update(args, db: PackageDatabase) -> int:
 
     try:
         # Build transaction queue with all operations
-        queue = TransactionQueue()
+        from ..core.config import get_rpm_root
+        rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
+        queue = TransactionQueue(root=rpm_root or "/")
 
         verify_sigs = not getattr(args, 'nosignature', False)
         force = getattr(args, 'force', False)
@@ -7007,7 +8269,9 @@ def cmd_autoremove(args, db: PackageDatabase) -> int:
         last_erase_shown = [None]
 
         # Build transaction queue
-        queue = TransactionQueue()
+        from ..core.config import get_rpm_root
+        rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
+        queue = TransactionQueue(root=rpm_root or "/")
         queue.add_erase(package_names, operation_id="autoremove")
 
         # Progress callback
@@ -7907,7 +9171,9 @@ def cmd_undo(args, db: PackageDatabase) -> int:
             last_erase_shown = [None]
 
             # Build transaction queue
-            queue = TransactionQueue()
+            from ..core.config import get_rpm_root
+            rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
+            queue = TransactionQueue(root=rpm_root or "/")
             queue.add_erase(to_remove, operation_id="undo_remove")
 
             # Progress callback
@@ -8211,7 +9477,9 @@ def cmd_rollback(args, db: PackageDatabase) -> int:
             last_erase_shown = [None]
 
             # Build transaction queue
-            queue = TransactionQueue()
+            from ..core.config import get_rpm_root
+            rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
+            queue = TransactionQueue(root=rpm_root or "/")
             queue.add_erase(to_remove, operation_id="rollback_remove")
 
             # Progress callback
@@ -8388,7 +9656,9 @@ def cmd_cleandeps(args, db: PackageDatabase) -> int:
         last_erase_shown = [None]
 
         # Build transaction queue
-        queue = TransactionQueue()
+        from ..core.config import get_rpm_root
+        rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
+        queue = TransactionQueue(root=rpm_root or "/")
         queue.add_erase(packages_to_erase, operation_id="cleandeps")
 
         # Progress callback
@@ -10449,10 +11719,15 @@ def main(argv=None) -> int:
     else:
         display.init(mode='columns', show_all=getattr(args, 'show_all', False))
 
+    # Get database path based on --urpm-root
+    from ..core.config import get_db_path
+    urpm_root = getattr(args, 'urpm_root', None)
+    db_path = get_db_path(urpm_root=urpm_root)
+
     if not args.command:
         # Check if any media is configured
         try:
-            db = PackageDatabase()
+            db = PackageDatabase(db_path=db_path)
             media_list = db.list_media()
         except Exception:
             # Can't open database or no media - show quick start guide
@@ -10468,12 +11743,21 @@ def main(argv=None) -> int:
             return 1
 
     # Open database for command execution
-    db = PackageDatabase()
+    db = PackageDatabase(db_path=db_path)
 
     try:
         # Route to command handler
-        if args.command in ('install', 'i'):
+        if args.command == 'init':
+            return cmd_init(args, db)
+
+        elif args.command == 'cleanup':
+            return cmd_cleanup(args, db)
+
+        elif args.command in ('install', 'i'):
             return cmd_install(args, db)
+
+        elif args.command in ('download', 'dl'):
+            return cmd_download(args, db)
 
         elif args.command in ('erase', 'e'):
             return cmd_erase(args, db)
@@ -10509,6 +11793,8 @@ def main(argv=None) -> int:
                 return cmd_media_set(args, db)
             elif args.media_command == 'seed-info':
                 return cmd_media_seed_info(args, db)
+            elif args.media_command in ('autoconfig', 'auto', 'ac'):
+                return cmd_media_autoconfig(args, db)
             else:
                 return cmd_not_implemented(args, db)
 
