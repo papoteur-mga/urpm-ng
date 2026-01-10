@@ -313,8 +313,8 @@ Examples:
         parents=[display_parent, debug_parent]
     )
     install_parser.add_argument(
-        'packages', nargs='+',
-        help='Package names to install'
+        'packages', nargs='*',
+        help='Package names to install (optional with --builddeps)'
     )
     install_parser.add_argument(
         '--auto', '-y',
@@ -375,6 +375,18 @@ Examples:
         '--nodeps',
         action='store_true',
         help='Skip dependency resolution (use with --download-only)'
+    )
+    install_parser.add_argument(
+        '--builddeps', '-b',
+        nargs='?',
+        const='AUTO',
+        metavar='SPEC_OR_SRPM',
+        help='Install build dependencies from spec file or SRPM'
+    )
+    install_parser.add_argument(
+        '--sync',
+        action='store_true',
+        help='Wait for all scriptlets and triggers to complete before returning'
     )
 
     # =========================================================================
@@ -5836,6 +5848,57 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print(colors.error("Error: --nodeps requires --download-only"))
         return 1
 
+    # Handle --builddeps option (install build dependencies from spec/SRPM)
+    builddeps = getattr(args, 'builddeps', None)
+    if builddeps:
+        from ..core.buildrequires import get_buildrequires, list_specs_in_workdir
+
+        try:
+            if builddeps == 'AUTO':
+                # Auto-detect mode
+                specs = list_specs_in_workdir()
+                if len(specs) > 1:
+                    print(colors.info("Multiple .spec files found:"))
+                    for i, spec in enumerate(specs, 1):
+                        print(f"  {i}. {spec.name}")
+                    if getattr(args, 'auto', False):
+                        print(colors.error("Error: Multiple .spec files found. Specify which one to use."))
+                        return 1
+                    try:
+                        choice = input("Select spec file (number): ").strip()
+                        idx = int(choice) - 1
+                        if 0 <= idx < len(specs):
+                            builddeps = str(specs[idx])
+                        else:
+                            print(colors.error("Invalid choice"))
+                            return 1
+                    except (ValueError, KeyboardInterrupt):
+                        print("\nAborted.")
+                        return 1
+                else:
+                    builddeps = 'AUTO'
+
+            target = None if builddeps == 'AUTO' else builddeps
+            reqs, source = get_buildrequires(target)
+            print(colors.info(f"Build dependencies from: {source}"))
+            print(f"  Found {len(reqs)} BuildRequires")
+
+            # Replace packages list with build requirements
+            args.packages = list(reqs)
+
+        except FileNotFoundError as e:
+            print(colors.error(f"Error: {e}"))
+            return 1
+        except ValueError as e:
+            print(colors.error(f"Error: {e}"))
+            return 1
+
+    # Check that we have something to install
+    if not args.packages and not builddeps:
+        print(colors.error("Error: No packages specified"))
+        print("Usage: urpm install <packages> or urpm install --builddeps <spec>")
+        return 1
+
     # Separate local RPM files from package names
     from pathlib import Path
     from ..core.rpm import is_local_rpm, read_rpm_header
@@ -7265,10 +7328,18 @@ def cmd_build(args, db: PackageDatabase) -> int:
         if not source_path.exists():
             print(colors.warning(f"Source not found: {source}"))
             continue
-        if source_path.suffix not in ('.rpm', '.spec'):
+        # Accept .spec files or .src.rpm (source RPMs)
+        if source_path.suffix == '.spec':
+            valid_sources.append(source_path)
+        elif source_path.suffix == '.rpm' and '.src.' in source_path.name:
+            valid_sources.append(source_path)
+        elif source_path.suffix == '.rpm':
+            print(colors.warning(f"Binary RPM cannot be built: {source}"))
+            print(colors.dim(f"  Use a .src.rpm or .spec file instead"))
+            continue
+        else:
             print(colors.warning(f"Unsupported source type: {source}"))
             continue
-        valid_sources.append(source_path)
 
     if not valid_sources:
         print(colors.error("No valid sources to build"))
@@ -7330,6 +7401,47 @@ def cmd_build(args, db: PackageDatabase) -> int:
     return 0 if fail_count == 0 else 1
 
 
+def _find_workspace(source_path: 'Path') -> tuple:
+    """Find the workspace root and SOURCES directory for a spec file.
+
+    Supports layouts:
+    - workspace/SPECS/foo.spec + workspace/SOURCES/
+    - workspace/foo.spec + workspace/SOURCES/
+    - dir/foo.spec + dir/SOURCES/ (or dir/*.tar.gz)
+
+    Returns:
+        Tuple of (workspace_path, sources_dir, is_rpmbuild_layout)
+        - workspace_path: Root of the workspace (for output)
+        - sources_dir: Directory containing source files
+        - is_rpmbuild_layout: True if SPECS/SOURCES layout
+    """
+    from pathlib import Path
+
+    source_path = Path(source_path).resolve()
+    parent = source_path.parent
+
+    # Check if spec is in SPECS/ directory
+    if parent.name == 'SPECS':
+        workspace = parent.parent
+        sources_dir = workspace / 'SOURCES'
+        if sources_dir.is_dir():
+            return (workspace, sources_dir, True)
+
+    # Check for SOURCES/ in same directory as spec
+    sources_dir = parent / 'SOURCES'
+    if sources_dir.is_dir():
+        return (parent, sources_dir, True)
+
+    # Check for source files directly in same directory
+    sources = list(parent.glob('*.tar.gz')) + list(parent.glob('*.tar.xz')) + \
+              list(parent.glob('*.tar.bz2')) + list(parent.glob('*.tgz'))
+    if sources:
+        return (parent, parent, False)
+
+    # No sources found - return parent anyway
+    return (parent, None, False)
+
+
 def _build_single_package(
     container: 'Container',
     image: str,
@@ -7346,6 +7458,9 @@ def _build_single_package(
     from . import colors
 
     cid = None
+    workspace = None
+    is_spec_build = source_path.suffix == '.spec'
+
     try:
         # 1. Start fresh container with host network (for urpmd P2P access)
         cid = container.run(
@@ -7357,47 +7472,72 @@ def _build_single_package(
         )
         print(f"  Container: {cid[:12]}")
 
-        # Create build directory
-        container.exec(cid, ['mkdir', '-p', '/build'])
+        # 2. Prepare rpmbuild directories
+        container.exec(cid, ['mkdir', '-p', '/root/rpmbuild/SPECS'])
+        container.exec(cid, ['mkdir', '-p', '/root/rpmbuild/SOURCES'])
+        container.exec(cid, ['mkdir', '-p', '/root/rpmbuild/BUILD'])
+        container.exec(cid, ['mkdir', '-p', '/root/rpmbuild/RPMS'])
+        container.exec(cid, ['mkdir', '-p', '/root/rpmbuild/SRPMS'])
 
-        # 2. Copy source into container
+        # 3. Copy source into container
         print(f"  Copying source...")
-        if not container.cp(str(source_path), f"{cid}:/build/"):
-            return (source_path, False, "Failed to copy source")
 
-        # 3. Determine spec file path
         if source_path.suffix == '.rpm' and '.src.' in source_path.name:
-            # Source RPM - install it to get spec
+            # Source RPM - install it to extract spec and sources
+            if not container.cp(str(source_path), f"{cid}:/root/rpmbuild/SRPMS/"):
+                return (source_path, False, "Failed to copy SRPM")
+
             print(f"  Installing SRPM...")
             result = container.exec(cid, [
-                'rpm', '-ivh', f'/build/{source_path.name}'
+                'rpm', '-ivh', f'/root/rpmbuild/SRPMS/{source_path.name}'
             ])
             if result.returncode != 0:
                 return (source_path, False, f"SRPM install failed: {result.stderr}")
 
             # Find spec file (name without version-release.src.rpm)
-            # e.g., foo-1.0-1.mga10.src.rpm -> foo.spec
             name_parts = source_path.stem.replace('.src', '').rsplit('-', 2)
             spec_name = name_parts[0] + '.spec'
             spec_path = f'/root/rpmbuild/SPECS/{spec_name}'
+
+        elif is_spec_build:
+            # Spec file - need to copy spec and sources
+            workspace, sources_dir, is_rpmbuild_layout = _find_workspace(source_path)
+
+            # Copy spec file
+            if not container.cp(str(source_path), f"{cid}:/root/rpmbuild/SPECS/"):
+                return (source_path, False, "Failed to copy spec file")
+            spec_path = f'/root/rpmbuild/SPECS/{source_path.name}'
+
+            # Copy all sources (tar.gz, patches, license files, etc.)
+            if sources_dir and sources_dir.exists():
+                # Count files to copy
+                source_files = [f for f in sources_dir.iterdir() if f.is_file()]
+                print(f"  Copying {len(source_files)} source files from {sources_dir}...")
+                # Copy entire directory content at once
+                container.cp(f"{sources_dir}/.", f"{cid}:/root/rpmbuild/SOURCES/")
+            else:
+                print(colors.warning(f"  Warning: No SOURCES directory found"))
+
         else:
-            # Spec file directly
-            spec_path = f'/build/{source_path.name}'
+            return (source_path, False, f"Unsupported source type: {source_path.suffix}")
 
-        # 4. Install build dependencies
-        print(f"  Installing BuildRequires...")
-        result = container.exec(cid, [
-            'urpmi', '--auto', '--buildrequires', spec_path
+        # 4. Install rpm-build (provides rpmbuild)
+        print(f"  Installing rpm-build...")
+        ret = container.exec_stream(cid, [
+            'urpm', 'install', '--auto', '--sync', 'rpm-build'
         ])
-        if result.returncode != 0:
-            # Try with dnf/yum builddep as fallback
-            result = container.exec(cid, [
-                'dnf', 'builddep', '-y', spec_path
-            ])
-            if result.returncode != 0:
-                return (source_path, False, f"BuildRequires install failed")
+        if ret != 0:
+            return (source_path, False, "Failed to install rpm-build")
 
-        # 5. Build the package
+        # 5. Install build dependencies
+        print(f"  Installing BuildRequires...")
+        ret = container.exec_stream(cid, [
+            'urpm', 'install', '--auto', '--sync', '--builddeps', spec_path
+        ])
+        if ret != 0:
+            return (source_path, False, f"BuildRequires install failed")
+
+        # 6. Build the package
         print(f"  Building...")
         result = container.exec_stream(cid, [
             'rpmbuild', '-ba', spec_path
@@ -7405,26 +7545,44 @@ def _build_single_package(
         if result != 0:
             return (source_path, False, "rpmbuild failed")
 
-        # 6. Copy results out
+        # 7. Copy results out
         print(f"  Retrieving results...")
-        pkg_output = output_dir / source_path.stem.replace('.src', '')
-        pkg_output.mkdir(parents=True, exist_ok=True)
 
-        # Copy RPMS
-        rpms_dir = pkg_output / 'RPMS'
-        rpms_dir.mkdir(exist_ok=True)
+        # Determine output location
+        if is_spec_build and workspace:
+            # For spec builds, output to workspace/{RPMS,SRPMS}
+            rpms_dir = workspace / 'RPMS'
+            srpms_dir = workspace / 'SRPMS'
+        else:
+            # For SRPM builds, output to specified output_dir
+            pkg_output = output_dir / source_path.stem.replace('.src', '')
+            pkg_output.mkdir(parents=True, exist_ok=True)
+            rpms_dir = pkg_output / 'RPMS'
+            srpms_dir = pkg_output / 'SRPMS'
+
+        rpms_dir.mkdir(parents=True, exist_ok=True)
+        srpms_dir.mkdir(parents=True, exist_ok=True)
+
         container.cp(f"{cid}:/root/rpmbuild/RPMS/.", str(rpms_dir))
-
-        # Copy SRPMS
-        srpms_dir = pkg_output / 'SRPMS'
-        srpms_dir.mkdir(exist_ok=True)
         container.cp(f"{cid}:/root/rpmbuild/SRPMS/.", str(srpms_dir))
+
+        # 8. Copy build log (to SPECS directory for spec builds)
+        if is_spec_build and workspace:
+            log_dir = workspace / 'SPECS'
+        else:
+            log_dir = rpms_dir.parent
+        # Get build.log if exists
+        result = container.exec(cid, ['cat', '/root/rpmbuild/BUILD/build.log'])
+        if result.returncode == 0 and result.stdout:
+            log_file = log_dir / f"{source_path.stem}.build.log"
+            log_file.write_text(result.stdout)
 
         # Count built packages
         rpm_count = len(list(rpms_dir.rglob('*.rpm')))
         srpm_count = len(list(srpms_dir.rglob('*.rpm')))
 
-        return (source_path, True, f"{rpm_count} RPMs, {srpm_count} SRPMs -> {pkg_output}")
+        output_location = workspace if (is_spec_build and workspace) else rpms_dir.parent
+        return (source_path, True, f"{rpm_count} RPMs, {srpm_count} SRPMs -> {output_location}")
 
     except Exception as e:
         return (source_path, False, str(e))

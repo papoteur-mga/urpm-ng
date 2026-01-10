@@ -2,7 +2,7 @@
 BuildRequires parser for spec files and source RPMs.
 
 Extracts build dependencies from:
-- .spec files (via rpm --specfile --buildrequires)
+- .spec files (direct parsing)
 - .src.rpm files (via rpm -qp --requires)
 - Auto-detect in RPM build tree (SPECS/ directory)
 """
@@ -81,40 +81,49 @@ def list_specs_in_workdir(workdir: Path = None) -> List[Path]:
 def parse_buildrequires_from_spec(spec_path: Path) -> List[str]:
     """Parse BuildRequires from a .spec file.
 
-    Uses `rpm --specfile --buildrequires` to extract build dependencies.
-    This handles all spec file features (macros, conditionals, etc.).
+    Parses the spec file directly to extract BuildRequires lines.
 
     Args:
         spec_path: Path to the .spec file.
 
     Returns:
-        List of build requirement names (package names).
+        List of build requirement names (package names only, no versions).
 
     Raises:
         FileNotFoundError: If spec file doesn't exist.
-        subprocess.CalledProcessError: If rpm command fails.
     """
+    import re
+
     spec_path = Path(spec_path)
     if not spec_path.exists():
         raise FileNotFoundError(f"Spec file not found: {spec_path}")
 
-    result = subprocess.run(
-        ["rpm", "--specfile", str(spec_path), "--buildrequires"],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-
-    # Parse output: one requirement per line
-    # May include version constraints like "python3 >= 3.8"
-    # We return the full requirement string for the resolver
     requirements = []
-    for line in result.stdout.strip().split('\n'):
-        line = line.strip()
-        if line:
-            requirements.append(line)
 
-    return requirements
+    with open(spec_path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            line = line.strip()
+            # Match BuildRequires: (case insensitive)
+            if line.lower().startswith('buildrequires:'):
+                # Extract the part after BuildRequires:
+                deps_part = line.split(':', 1)[1].strip()
+                # Split by comma or whitespace for multiple deps on one line
+                # Handle version constraints like "pkg >= 1.0" - extract just pkg name
+                for dep in re.split(r'[,\s]+', deps_part):
+                    dep = dep.strip()
+                    if not dep or dep.startswith('#'):
+                        continue
+                    # Skip version operators and numbers
+                    if dep in ('>=', '<=', '>', '<', '=', '=='):
+                        continue
+                    if re.match(r'^[\d.]+$', dep):
+                        continue
+                    # Skip macros we can't resolve
+                    if dep.startswith('%'):
+                        continue
+                    requirements.append(dep)
+
+    return list(dict.fromkeys(requirements))  # Remove duplicates, preserve order
 
 
 def parse_buildrequires_from_srpm(srpm_path: Path) -> List[str]:

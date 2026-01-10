@@ -49,6 +49,12 @@ N'installe pas les paquets recommandes.
 .TP
 .B \-\-with\-suggests
 Installe aussi les paquets suggeres.
+.TP
+.BR \-b ", " \-\-builddeps " " \fI[spec]\fR
+Installe les dependances de build depuis un fichier spec ou SRPM. Auto-detection si non specifie.
+.TP
+.B \-\-sync
+Attend la fin de tous les scriptlets et triggers avant de retourner.
 .RE
 .TP
 .B e|erase \fIpaquet\fR ...
@@ -218,6 +224,81 @@ Gere les cles GPG pour la verification des paquets.
 .TP
 .B mark \fIpaquet\fR manual|auto
 Marque les paquets comme installes manuellement ou automatiquement.
+.SS Initialisation et telechargement
+.TP
+.B init \fR[\fB\-\-release\fR \fIversion\fR] [\fB\-\-mirrorlist\fR \fIurl\fR]
+Initialise urpm avec les medias Mageia standard. Teste les miroirs et configure les meilleurs.
+.RS
+.TP
+.BR \-r ", " \-\-release " " \fIversion\fR
+Version Mageia (ex: 10, cauldron).
+.TP
+.B \-\-urpm\-root " " \fIchemin\fR
+Initialise dans un repertoire chroot.
+.RE
+.TP
+.B download \fIpaquet\fR ...
+Telecharge les paquets dans le cache sans les installer.
+.RS
+.TP
+.BR \-r ", " \-\-release " " \fIversion\fR
+Version cible pour les telechargements multi-versions.
+.TP
+.BR \-b ", " \-\-builddeps " " \fI[spec]\fR
+Telecharge les dependances de build depuis un fichier spec.
+.RE
+.SS Systeme de build en conteneurs
+.TP
+.B mkimage \fB\-\-release\fR \fIversion\fR \fB\-\-tag\fR \fItag\fR
+Cree une image Docker/Podman minimale pour les builds RPM.
+.RS
+.TP
+.BR \-r ", " \-\-release " " \fIversion\fR
+Version Mageia (ex: 10, cauldron).
+.TP
+.BR \-t ", " \-\-tag " " \fItag\fR
+Tag de l'image (ex: mageia:10-build).
+.TP
+.B \-\-arch " " \fIarch\fR
+Architecture cible (defaut: hote).
+.TP
+.BR \-p ", " \-\-packages " " \fIliste\fR
+Paquets supplementaires (separes par des virgules).
+.TP
+.B \-\-runtime " " docker|podman
+Runtime conteneur (defaut: auto-detection).
+.TP
+.B \-\-keep\-chroot
+Conserver le chroot temporaire apres la creation de l'image.
+.TP
+.BR \-w ", " \-\-workdir " " \fIchemin\fR
+Repertoire de travail pour le chroot (defaut: /tmp).
+.RE
+.TP
+.B build \fB\-\-image\fR \fItag\fR \fIsource\fR ...
+Construit des paquets RPM dans des conteneurs isoles.
+.RS
+.TP
+.BR \-i ", " \-\-image " " \fItag\fR
+Image Docker/Podman a utiliser.
+.TP
+.BR \-o ", " \-\-output " " \fIrep\fR
+Repertoire de sortie (defaut: ./build-output ou workspace/{RPMS,SRPMS}).
+.TP
+.B \-\-runtime " " docker|podman
+Runtime conteneur (defaut: auto-detection).
+.TP
+.BR \-j ", " \-\-parallel " " \fIN\fR
+Nombre de builds paralleles (defaut: 1).
+.TP
+.B \-\-keep\-container
+Conserver le conteneur apres le build (pour debug).
+.PP
+Les sources peuvent etre des fichiers .src.rpm ou .spec. Pour les fichiers .spec,
+les sources sont automatiquement copiees depuis le repertoire SOURCES/ (supporte
+les arborescences workspace/SPECS/ et workspace/SOURCES/). Les resultats vont
+dans workspace/RPMS/ et workspace/SRPMS/ pour les builds spec.
+.RE
 .SH FICHIERS
 .TP
 .I /var/lib/urpm/

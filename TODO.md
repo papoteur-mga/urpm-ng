@@ -54,13 +54,13 @@ Aujourd'hui c'est confus : update fait les deux selon les arguments.
 - [x] Option `--download-only` sur install
 - [ ] Option `--download-only` sur upgrade
 - [ ] Option `--destdir <path>` pour spécifier répertoire destination (compatibilité urpmi)
-- [ ] Commande `urpm download <pkg>`
+- [x] Commande `urpm download <pkg>`
 
 ### builddep
-- [ ] Parser BuildRequires du SRPM/.spec
-- [ ] `urpm builddep <pkg.spec>`
-- [ ] `urpm builddep <pkg.src.rpm>`
-- [ ] `urpm builddep` (dans une arborescence de travail RPM)
+- [x] Parser BuildRequires du SRPM/.spec (parsing Python direct)
+- [x] `urpm install --builddeps <pkg.spec>`
+- [x] `urpm install --builddeps <pkg.src.rpm>`
+- [x] `urpm install -b` (auto-détection dans arborescence de travail RPM)
 
 ### Parsing hdlist.cz
 - [ ] Vérifier si le DL des hdlists.cz est encore nécessaire. Parce que quand on fait un urpmf c'est un fichier media_info/files.xml.lzma qui est récupéré et analysé.
@@ -103,22 +103,20 @@ urpm bootstrap </chemin/vers/repertoire> ferait tout ça d'un coup
 
 ### docker images, build
 
-Je ne sais pas si c'est bien d'aller jusqu'à générer l'image docker (entrer dans le chroot, faire l'urpm m u et urpm u, vidanger le cache urpm, effacer /etc/syconfig/network, rebuilder la rmpdb peut être ? sortir du chroot faire le dockerfile, le tar de l'arborescence fraichement créée, et le docker build...
+**Implémenté :**
+- [x] `urpm mkimage --release <version> --tag <tag>` : création d'images Docker/Podman minimales
+- [x] `urpm build --image <tag> <source>` : build de RPM en containers isolés
+- [x] Support workspace layout (SPECS/SOURCES → RPMS/SRPMS)
+- [x] Builds parallèles (`--parallel N`)
+- [x] Auto-détection Docker/Podman (`--runtime`)
+- [x] P2P via `--network host` pour le cache urpmd
 
-L'idée c'est que rapidement urpm puisse aussi tester des installs et builder des rpm en environnement tout neuf... donc urpm build-image|bi --option bla bla mga9 x86_64 et urpm rebuild|rb unfichier.src.rpm mga9 x86_64 ou urpm build|b mga9 x86_64 (dans une arborescence de travail RPM avec SOURCES et SPECS)
-Ça instanciera un conteneur à partir de l'image de ref, avec un répretoire "partagé" pour la persistance, ça fera le urpm builddep et ensuite le bm/rpmbuild
-Et ça pourra aussi instancier un autre conteneur vierge pour tester le urpm i du fichier et valider que ça s'installe sans souci.
-Attention que le urpm dans son conteneur devra pouvoir tirer partie des peers dispos (et peut être même qu'il faudra prévoir un download prédictif sur la machine locale de façon à disposer au moins d'un peer avec toutes les dépendances nécessaires...
-
-urpm image build mga9 x86_64
-urpm image list
-urpm image delete <identifiant>
-
-urpm build
-
-urpm build <rpmfource.src.rpm>
-
-Et à la fin l'idée c'est que ça puisse même être effectué par urpmd, piloté via les API par un ordonnanceur pour faire du rebuild de masse parallélisé.
+**À faire :**
+- [ ] `urpm container list` : lister containers actifs
+- [ ] `urpm container shell --image <tag>` : shell interactif
+- [ ] `urpm container prune` : nettoyer containers terminés
+- [ ] Test d'installation automatique dans container vierge
+- [ ] Orchestration via urpmd pour builds de masse parallélisés
 
 ### Split ?
 

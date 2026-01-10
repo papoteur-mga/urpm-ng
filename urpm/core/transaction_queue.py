@@ -339,6 +339,8 @@ class TransactionQueue:
 
         # In sync mode, wait for child process and all its descendants
         if sync:
+            # Orange color for waiting message
+            print("\033[33m  Waiting for scriptlets to complete...\033[0m", flush=True)
             try:
                 os.waitpid(child_pid, 0)
             except ChildProcessError:

@@ -48,6 +48,12 @@ Do not install recommended packages.
 .TP
 .B \-\-with\-suggests
 Also install suggested packages.
+.TP
+.BR \-b ", " \-\-builddeps " " \fI[spec]\fR
+Install build dependencies from spec file or SRPM. Auto-detects if no file specified.
+.TP
+.B \-\-sync
+Wait for all scriptlets and triggers to complete before returning.
 .RE
 .TP
 .B e|erase \fIpackage\fR ...
@@ -217,6 +223,81 @@ Manage GPG keys for package verification.
 .TP
 .B mark \fIpackage\fR manual|auto
 Mark packages as manually or automatically installed.
+.SS Initialization and Download
+.TP
+.B init \fR[\fB\-\-release\fR \fIversion\fR] [\fB\-\-mirrorlist\fR \fIurl\fR]
+Initialize urpm with standard Mageia media. Tests mirrors and configures the best ones.
+.RS
+.TP
+.BR \-r ", " \-\-release " " \fIversion\fR
+Mageia version (e.g., 10, cauldron).
+.TP
+.B \-\-urpm\-root " " \fIpath\fR
+Initialize in a chroot directory.
+.RE
+.TP
+.B download \fIpackage\fR ...
+Download packages to cache without installing.
+.RS
+.TP
+.BR \-r ", " \-\-release " " \fIversion\fR
+Target release for cross-release downloads.
+.TP
+.BR \-b ", " \-\-builddeps " " \fI[spec]\fR
+Download build dependencies from spec file.
+.RE
+.SS Container Build System
+.TP
+.B mkimage \fB\-\-release\fR \fIversion\fR \fB\-\-tag\fR \fItag\fR
+Create a minimal Docker/Podman image for RPM builds.
+.RS
+.TP
+.BR \-r ", " \-\-release " " \fIversion\fR
+Mageia version (e.g., 10, cauldron).
+.TP
+.BR \-t ", " \-\-tag " " \fItag\fR
+Image tag (e.g., mageia:10-build).
+.TP
+.B \-\-arch " " \fIarch\fR
+Target architecture (default: host).
+.TP
+.BR \-p ", " \-\-packages " " \fIlist\fR
+Additional packages (comma-separated).
+.TP
+.B \-\-runtime " " docker|podman
+Container runtime (default: auto-detect).
+.TP
+.B \-\-keep\-chroot
+Keep temporary chroot after image creation.
+.TP
+.BR \-w ", " \-\-workdir " " \fIpath\fR
+Working directory for chroot (default: /tmp).
+.RE
+.TP
+.B build \fB\-\-image\fR \fItag\fR \fIsource\fR ...
+Build RPM packages in isolated containers.
+.RS
+.TP
+.BR \-i ", " \-\-image " " \fItag\fR
+Docker/Podman image to use.
+.TP
+.BR \-o ", " \-\-output " " \fIdir\fR
+Output directory (default: ./build-output or workspace/{RPMS,SRPMS}).
+.TP
+.B \-\-runtime " " docker|podman
+Container runtime (default: auto-detect).
+.TP
+.BR \-j ", " \-\-parallel " " \fIN\fR
+Number of parallel builds (default: 1).
+.TP
+.B \-\-keep\-container
+Keep container after build (for debugging).
+.PP
+Sources can be .src.rpm files or .spec files. For .spec files, sources are
+automatically copied from the SOURCES/ directory (supports workspace/SPECS/
+and workspace/SOURCES/ layouts). Results go to workspace/RPMS/ and
+workspace/SRPMS/ for spec builds.
+.RE
 .SH FILES
 .TP
 .I /var/lib/urpm/

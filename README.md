@@ -445,6 +445,94 @@ urpm key import <file|url>    # Import a GPG key
 urpm key remove <keyid>       # Remove a GPG key
 ```
 
+## Build Dependencies
+
+Install build dependencies for RPM building:
+
+```bash
+urpm install --builddeps foo.spec       # From spec file
+urpm install --builddeps foo.src.rpm    # From source RPM
+urpm i -b                                # Auto-detect in RPM build tree
+
+# Options
+--sync                        # Wait for all scriptlets to complete
+```
+
+## Container Build System
+
+urpm provides a complete container-based build system for RPM packages using Docker or Podman.
+
+### Create build image
+
+```bash
+urpm mkimage --release 10 --tag mageia:10-build
+
+# Options
+-r, --release <version>       # Mageia version (e.g., 10, cauldron)
+-t, --tag <tag>               # Image tag (e.g., mageia:10-build)
+--arch <arch>                 # Target architecture (default: host)
+-p, --packages <list>         # Additional packages (comma-separated)
+--runtime docker|podman       # Container runtime (default: auto-detect)
+--keep-chroot                 # Keep temporary chroot after image creation
+-w, --workdir <path>          # Working directory for chroot (default: /tmp)
+```
+
+### Build packages
+
+```bash
+# Build from source RPM
+urpm build --image mageia:10-build ./foo-1.0-1.mga10.src.rpm
+
+# Build from spec file (sources auto-copied from SOURCES/)
+urpm build --image mageia:10-build ./workspace/SPECS/foo.spec
+
+# Multiple builds in parallel
+urpm build --image mageia:10-build *.src.rpm --parallel 4
+
+# Options
+-i, --image <tag>             # Docker/Podman image to use
+-o, --output <dir>            # Output directory (default: ./build-output)
+--runtime docker|podman       # Container runtime (default: auto-detect)
+-j, --parallel <N>            # Number of parallel builds (default: 1)
+--keep-container              # Keep container after build (for debugging)
+```
+
+### Workspace layout
+
+For spec file builds, urpm supports the standard RPM workspace layout:
+
+```
+workspace/
+├── SPECS/
+│   └── foo.spec
+└── SOURCES/
+    ├── foo-1.0.tar.gz
+    └── patches/
+```
+
+Results are placed in:
+```
+workspace/
+├── RPMS/
+│   └── x86_64/
+│       └── foo-1.0-1.mga10.x86_64.rpm
+└── SRPMS/
+    └── foo-1.0-1.mga10.src.rpm
+```
+
+### Example workflow
+
+```bash
+# 1. Create build image (once)
+urpm mkimage --release 10 --tag mga:10-build
+
+# 2. Build a package
+urpm build --image mga:10-build ./mypackage.src.rpm
+
+# 3. Check results
+ls ./build-output/
+```
+
 ## Orphan Cleanup
 
 ```bash
