@@ -271,8 +271,8 @@ def build_server_url(server: dict) -> str:
     base_path = server.get('base_path', '').rstrip('/')
 
     if protocol == 'file':
-        # Local filesystem - just return the path
-        return base_path
+        # Local filesystem - return file:// URL for urllib compatibility
+        return f"file://{base_path}"
     else:
         # Remote URL
         return f"{protocol}://{host}{base_path}"
