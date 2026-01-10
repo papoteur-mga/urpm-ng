@@ -4159,7 +4159,7 @@ def cmd_media_autoconfig(args, db: PackageDatabase) -> int:
     skipped = 0
 
     # First, add servers from best mirrors
-    server_added = False
+    server_to_use = None
     for latency, mirror_url in best_mirrors[:1]:  # Just use the best one
         base_url = extract_base_url(mirror_url, release, arch)
         parsed = urlparse(base_url)
@@ -4167,18 +4167,19 @@ def cmd_media_autoconfig(args, db: PackageDatabase) -> int:
 
         # Check if server already exists
         existing_server = db.get_server(server_name)
-        if not existing_server:
-            if dry_run:
-                print(f"  Would add server: {server_name} ({base_url})")
-            else:
-                db.add_server(
-                    name=server_name,
-                    protocol=parsed.scheme,
-                    host=parsed.hostname,
-                    base_path=parsed.path
-                )
-                print(f"  Added server: {server_name}")
-            server_added = True
+        if existing_server:
+            server_to_use = existing_server
+        elif not dry_run:
+            db.add_server(
+                name=server_name,
+                protocol=parsed.scheme,
+                host=parsed.hostname,
+                base_path=parsed.path
+            )
+            print(f"  Added server: {server_name}")
+            server_to_use = db.get_server(server_name)
+        else:
+            print(f"  Would add server: {server_name} ({base_url})")
 
     # Add each media type
     for media_type, repo, name_suffix in media_types:
@@ -4213,13 +4214,10 @@ def cmd_media_autoconfig(args, db: PackageDatabase) -> int:
             print(f"  Added media: {media_name}")
 
             # Link media to server
-            if server_added:
-                parsed = urlparse(best_mirrors[0][1])
-                server = db.get_server(parsed.hostname)
-                if server:
-                    media = db.get_media(media_name)
-                    if media:
-                        db.link_media_to_server(media['id'], server['id'])
+            if server_to_use:
+                media = db.get_media(media_name)
+                if media:
+                    db.link_media_to_server(media['id'], server_to_use['id'])
 
         added += 1
 
