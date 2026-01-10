@@ -60,6 +60,7 @@ class QueuedOperation:
     force: bool = False
     test: bool = False
     background: bool = False  # If True, parent doesn't wait for this operation
+    reinstall: bool = False  # If True, allow reinstalling same version
 
 
 @dataclass
@@ -151,7 +152,8 @@ class TransactionQueue:
         verify_signatures: bool = True,
         force: bool = False,
         test: bool = False,
-        erase_names: List[str] = None
+        erase_names: List[str] = None,
+        reinstall: bool = False
     ) -> 'TransactionQueue':
         """Add an install operation to the queue.
 
@@ -163,6 +165,7 @@ class TransactionQueue:
             test: Test mode - don't actually install
             erase_names: List of package names to erase in the SAME transaction
                         (for obsoleted packages that must be removed atomically)
+            reinstall: Allow reinstalling same version without --force
 
         Returns:
             self for method chaining
@@ -175,6 +178,7 @@ class TransactionQueue:
                 verify_signatures=verify_signatures,
                 force=force,
                 test=test,
+                reinstall=reinstall,
             )
             # Store erase_names as extra attribute
             op.erase_names = erase_names or []
@@ -611,6 +615,9 @@ class TransactionQueue:
                 rpm.RPMPROB_FILTER_REPLACENEWFILES |
                 rpm.RPMPROB_FILTER_REPLACEOLDFILES
             )
+        elif op.reinstall:
+            # Reinstall only needs REPLACEPKG to allow same version
+            prob_filter |= rpm.RPMPROB_FILTER_REPLACEPKG
         if prob_filter:
             ts.setProbFilter(prob_filter)
 

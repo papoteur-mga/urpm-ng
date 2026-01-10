@@ -6904,6 +6904,7 @@ def cmd_install(args, db: PackageDatabase) -> int:
         verify_sigs = not getattr(args, 'nosignature', False)
         force = getattr(args, 'force', False)
         test_mode = getattr(args, 'test', False)
+        reinstall_mode = getattr(args, 'reinstall', False)
 
         # Build transaction queue
         # Get root for chroot installation
@@ -6915,7 +6916,8 @@ def cmd_install(args, db: PackageDatabase) -> int:
             operation_id="install",
             verify_signatures=verify_sigs,
             force=force,
-            test=test_mode
+            test=test_mode,
+            reinstall=reinstall_mode
         )
 
         # Progress callback
