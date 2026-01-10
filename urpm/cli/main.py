@@ -1976,32 +1976,89 @@ def cmd_search(args, db: PackageDatabase) -> int:
         print(colors.warning(f"No packages found for '{args.pattern}'"))
         return 1
 
-    def highlight(text, pattern):
-        """Highlight pattern occurrences in text with green."""
+    # ANSI codes without reset for proper nesting
+    GREEN = '\033[92m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+
+    def highlight_with_base(text, pattern, base_code):
+        """Highlight pattern in green, rest in base color (using raw ANSI codes)."""
         if not colors.enabled():
             return text
         try:
             regex = re.compile(f'({re.escape(pattern)})', re.IGNORECASE)
-            return regex.sub(colors.success(r'\1'), text)
+            parts = regex.split(text)
+            result = [base_code]  # Start with base color
+            for i, part in enumerate(parts):
+                if not part:
+                    continue
+                if i % 2 == 1:  # Match - switch to green then back to base
+                    result.append(f"{GREEN}{part}{RESET}{base_code}")
+                else:  # Non-match - already in base color
+                    result.append(part)
+            result.append(RESET)  # End with reset
+            return ''.join(result)
         except re.error:
-            return text
+            return f"{base_code}{text}{RESET}"
+
+    def split_kernel_name(name: str) -> tuple:
+        """Split Mageia kernel package name into base name and kernel version.
+
+        Mageia kernel packages have names like:
+        - kernel-desktop-6.12.63-1.mga10 (name=kernel-desktop, kver=6.12.63-1.mga10)
+        - kernel-stable-testing-server-6.18.3-2.stabletesting.mga10
+
+        Returns:
+            (base_name, kernel_version) or (name, None) if not a kernel package
+        """
+        if not name.startswith('kernel-'):
+            return name, None
+
+        # Find the first segment that starts with a digit (kernel version)
+        parts = name.split('-')
+        for i, part in enumerate(parts):
+            if i > 0 and part and part[0].isdigit():
+                base_name = '-'.join(parts[:i])
+                kernel_version = '-'.join(parts[i:])
+                return base_name, kernel_version
+
+        return name, None
 
     pattern = args.pattern
 
     for pkg in results:
-        # Name in bold, version normal, release.arch in dim
-        name = colors.bold(highlight(pkg['name'], pattern))
-        version = highlight(pkg['version'], pattern)
-        release_arch = colors.dim(f"{pkg['release']}.{pkg['arch']}")
+        pkg_name = pkg['name']
+        pkg_version = pkg['version']
+
+        # For kernel packages, extract the kernel version from the name for display
+        base_name, kernel_ver = split_kernel_name(pkg_name)
+        if kernel_ver:
+            # Kernel package: show base name in bold, kernel version as version
+            display_name = base_name
+            display_version = kernel_ver
+        else:
+            # Normal package
+            display_name = pkg_name
+            display_version = pkg_version
+
+        # Name in bold, matches in green, then back to bold
+        name = highlight_with_base(display_name, pattern, BOLD)
+        # Version: normal (no base code), matches in green
+        version = highlight_with_base(display_version, pattern, '')
+        # Release.arch: all dim
+        release_arch = f"{DIM}{pkg['release']}.{pkg['arch']}{RESET}"
         nevra_display = f"{name}-{version}-{release_arch}"
 
         summary = pkg.get('summary', '')[:60]
-        summary = highlight(summary, pattern)
+        summary = highlight_with_base(summary, pattern, '')
 
         # Show which provide matched if found via provides
         if pkg.get('matched_provide'):
-            matched = highlight(pkg['matched_provide'], pattern)
-            print(f"{nevra_display}  {colors.dim(f'(provides: {matched})')}")
+            # Entire "(provides: xxx)" in dim, with matches in green
+            provide_text = f"(provides: {pkg['matched_provide']})"
+            provide_display = highlight_with_base(provide_text, pattern, DIM)
+            print(f"{nevra_display}  {provide_display}")
         else:
             print(f"{nevra_display}  {summary}")
 

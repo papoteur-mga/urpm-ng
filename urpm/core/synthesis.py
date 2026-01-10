@@ -15,10 +15,10 @@ from .compression import decompress
 
 def parse_nevra(nevra: str) -> Tuple[str, str, str, str]:
     """Parse a NEVRA string into components.
-    
+
     Args:
         nevra: String like "firefox-120.0-1.mga9.x86_64"
-        
+
     Returns:
         Tuple of (name, version, release, arch)
     """
@@ -30,7 +30,7 @@ def parse_nevra(nevra: str) -> Tuple[str, str, str, str]:
     else:
         arch = 'noarch'
         name_ver_rel = nevra
-    
+
     # Split name-version-release (tricky because name can contain -)
     parts = name_ver_rel.rsplit('-', 2)
     if len(parts) >= 3:
@@ -45,7 +45,7 @@ def parse_nevra(nevra: str) -> Tuple[str, str, str, str]:
         name = name_ver_rel
         version = ''
         release = ''
-    
+
     return name, version, release, arch
 
 

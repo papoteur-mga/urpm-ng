@@ -1584,12 +1584,12 @@ class PackageDatabase:
     # Package queries
     # =========================================================================
     
-    def search(self, pattern: str, limit: int = 50, search_provides: bool = False) -> List[Dict]:
+    def search(self, pattern: str, limit: int = None, search_provides: bool = False) -> List[Dict]:
         """Search packages by name pattern, optionally also in provides.
 
         Args:
             pattern: Search pattern (case-insensitive substring match)
-            limit: Maximum results to return
+            limit: Maximum results to return (None = no limit)
             search_provides: If True, also search in provides capabilities
 
         Returns:
@@ -1600,38 +1600,56 @@ class PackageDatabase:
         seen_ids = set()
 
         # Search by name
-        cursor = self.conn.execute("""
-            SELECT id, name, version, release, arch, nevra, summary, size
-            FROM packages
-            WHERE name_lower LIKE ?
-            ORDER BY name_lower
-            LIMIT ?
-        """, (pattern_lower, limit))
+        if limit:
+            cursor = self.conn.execute("""
+                SELECT id, name, version, release, arch, nevra, summary, size
+                FROM packages
+                WHERE name_lower LIKE ?
+                ORDER BY name_lower
+                LIMIT ?
+            """, (pattern_lower, limit))
+        else:
+            cursor = self.conn.execute("""
+                SELECT id, name, version, release, arch, nevra, summary, size
+                FROM packages
+                WHERE name_lower LIKE ?
+                ORDER BY name_lower
+            """, (pattern_lower,))
 
         for row in cursor:
             pkg = dict(row)
             results.append(pkg)
             seen_ids.add(pkg['id'])
 
-        # Search in provides if requested and we have room for more results
-        if search_provides and len(results) < limit:
-            remaining = limit - len(results)
-            cursor = self.conn.execute("""
-                SELECT DISTINCT p.id, p.name, p.version, p.release, p.arch,
-                       p.nevra, p.summary, p.size, pr.capability as matched_provide
-                FROM packages p
-                JOIN provides pr ON pr.pkg_id = p.id
-                WHERE LOWER(pr.capability) LIKE ?
-                ORDER BY p.name_lower
-                LIMIT ?
-            """, (pattern_lower, remaining + len(seen_ids)))  # Get extra to filter dupes
+        # Search in provides if requested
+        if search_provides and (limit is None or len(results) < limit):
+            if limit:
+                remaining = limit - len(results)
+                cursor = self.conn.execute("""
+                    SELECT DISTINCT p.id, p.name, p.version, p.release, p.arch,
+                           p.nevra, p.summary, p.size, pr.capability as matched_provide
+                    FROM packages p
+                    JOIN provides pr ON pr.pkg_id = p.id
+                    WHERE LOWER(pr.capability) LIKE ?
+                    ORDER BY p.name_lower
+                    LIMIT ?
+                """, (pattern_lower, remaining + len(seen_ids)))
+            else:
+                cursor = self.conn.execute("""
+                    SELECT DISTINCT p.id, p.name, p.version, p.release, p.arch,
+                           p.nevra, p.summary, p.size, pr.capability as matched_provide
+                    FROM packages p
+                    JOIN provides pr ON pr.pkg_id = p.id
+                    WHERE LOWER(pr.capability) LIKE ?
+                    ORDER BY p.name_lower
+                """, (pattern_lower,))
 
             for row in cursor:
                 pkg = dict(row)
                 if pkg['id'] not in seen_ids:
                     seen_ids.add(pkg['id'])
                     results.append(pkg)
-                    if len(results) >= limit:
+                    if limit and len(results) >= limit:
                         break
 
         return results
