@@ -50,6 +50,9 @@ N'installe pas les paquets recommandes.
 .B \-\-with\-suggests
 Installe aussi les paquets suggeres.
 .TP
+.B \-\-only\-peers
+Telecharge uniquement depuis les pairs LAN, pas de miroirs upstream.
+.TP
 .BR \-b ", " \-\-builddeps " " \fI[spec]\fR
 Installe les dependances de build depuis un fichier spec ou SRPM. Auto-detection si non specifie.
 .TP
@@ -80,6 +83,11 @@ Met a jour diverses choses... media, paquets...
 .TP
 .B u|upgrade \fR[\fIpaquet\fR ...]
 Met a niveau les paquets (tout le systeme si aucun n'est specifie).
+.RS
+.TP
+.B \-\-only\-peers
+Telecharge uniquement depuis les pairs LAN, pas de miroirs upstream.
+.RE
 .SS Informations sur les paquets
 .TP
 .B q|query \fImotif\fR
@@ -293,6 +301,9 @@ Version cible pour les telechargements multi-versions.
 .TP
 .BR \-b ", " \-\-builddeps " " \fI[spec]\fR
 Telecharge les dependances de build depuis un fichier spec.
+.TP
+.B \-\-only\-peers
+Telecharge uniquement depuis les pairs LAN, pas de miroirs upstream.
 .RE
 .SS Systeme de build en conteneurs
 .TP

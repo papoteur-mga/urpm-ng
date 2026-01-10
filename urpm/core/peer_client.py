@@ -80,7 +80,8 @@ class PeerClient:
         """Discover peers on the LAN.
 
         First tries local urpmd (which maintains a peer list),
-        then falls back to direct UDP broadcast scan.
+        then falls back to direct UDP broadcast scan,
+        then tries container host fallback.
 
         Returns:
             List of discovered peers
@@ -96,6 +97,13 @@ class PeerClient:
         peers = self._scan_lan_udp()
         if peers:
             logger.info(f"Found {len(peers)} peers via UDP scan")
+            self._peers = peers
+            return peers
+
+        # Container fallback: try to reach host urpmd
+        peers = self._try_container_host()
+        if peers:
+            logger.info(f"Found {len(peers)} peers via container host fallback")
         else:
             logger.debug("No peers found")
         self._peers = peers
@@ -181,6 +189,40 @@ class PeerClient:
                     return peers
 
             except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+                continue
+
+        return []
+
+    def _try_container_host(self) -> List[Peer]:
+        """Try to reach host urpmd from inside a container.
+
+        Tries container-specific hostnames managed by the runtime:
+        - host.containers.internal (podman)
+        - host.docker.internal (docker)
+
+        Returns:
+            List with host peer if reachable, empty otherwise
+        """
+        port = DEV_URPMD_PORT if self.dev_mode else DEFAULT_URPMD_PORT
+
+        # Container-specific hostnames (managed by runtime, safe to trust)
+        hostnames = [
+            'host.containers.internal',  # podman
+            'host.docker.internal',      # docker
+        ]
+
+        for host in hostnames:
+            try:
+                url = f"http://{host}:{port}/api/status"
+                req = urllib.request.Request(url)
+                req.add_header('Accept', 'application/json')
+
+                with urllib.request.urlopen(req, timeout=1) as response:
+                    if response.status == 200:
+                        logger.debug(f"Found host urpmd at {host}:{port}")
+                        return [Peer(host=host, port=port)]
+
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError, socket.timeout):
                 continue
 
         return []

@@ -99,6 +99,8 @@ class UrpmdHandler(BaseHTTPRequestHandler):
             self.handle_announce(data)
         elif path == '/api/have':
             self.handle_have(data)
+        elif path == '/api/invalidate-cache':
+            self.handle_invalidate_cache()
         else:
             self.send_error_json(404, f"Unknown endpoint: {path}")
 
@@ -392,6 +394,15 @@ class UrpmdHandler(BaseHTTPRequestHandler):
 
         result = self.daemon.refresh_metadata(media_name, force)
         self.send_json(result)
+
+    def handle_invalidate_cache(self):
+        """Invalidate the RPM cache index so it will be rebuilt on next query."""
+        if not self.daemon:
+            self.send_error_json(500, "Daemon not initialized")
+            return
+
+        self.daemon.invalidate_rpm_index()
+        self.send_json({'status': 'ok', 'message': 'Cache index invalidated'})
 
     def handle_peers(self):
         """List known peers."""

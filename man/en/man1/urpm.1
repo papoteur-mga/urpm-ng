@@ -49,6 +49,9 @@ Do not install recommended packages.
 .B \-\-with\-suggests
 Also install suggested packages.
 .TP
+.B \-\-only\-peers
+Only download from LAN peers, no upstream mirrors.
+.TP
 .BR \-b ", " \-\-builddeps " " \fI[spec]\fR
 Install build dependencies from spec file or SRPM. Auto-detects if no file specified.
 .TP
@@ -79,6 +82,11 @@ Update various things media, packages...
 .TP
 .B u|upgrade \fR[\fIpackage\fR ...]
 Upgrade packages (system upgrade if none specified).
+.RS
+.TP
+.B \-\-only\-peers
+Only download from LAN peers, no upstream mirrors.
+.RE
 .SS Package Information
 .TP
 .B q|query \fIpattern\fR
@@ -292,6 +300,9 @@ Target release for cross-release downloads.
 .TP
 .BR \-b ", " \-\-builddeps " " \fI[spec]\fR
 Download build dependencies from spec file.
+.TP
+.B \-\-only\-peers
+Only download from LAN peers, no upstream mirrors.
 .RE
 .SS Container Build System
 .TP

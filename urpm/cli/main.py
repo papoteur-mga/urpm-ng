@@ -98,6 +98,31 @@ def _copy_installed_deps_list(root: str = '/', dest: Path = None):
         pass
 
 
+def _notify_urpmd_cache_invalidate():
+    """Notify local urpmd to invalidate its RPM cache index.
+
+    This allows newly downloaded packages to be visible to peer queries.
+    Tries both dev and prod ports silently.
+    """
+    import json
+    import urllib.request
+    import urllib.error
+    from ..core.config import DEV_PORT, PROD_PORT
+
+    ports = [DEV_PORT, PROD_PORT]
+
+    for port in ports:
+        try:
+            url = f"http://127.0.0.1:{port}/api/invalidate-cache"
+            req = urllib.request.Request(url, method='POST')
+            req.add_header('Content-Type', 'application/json')
+            with urllib.request.urlopen(req, timeout=1) as response:
+                if response.status == 200:
+                    return  # Success, no need to try other port
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+            continue  # Try next port or give up silently
+
+
 def print_quickstart_guide():
     """Print a quick start guide for new users with no media configured."""
     from . import colors
@@ -357,6 +382,11 @@ Examples:
         help='Disable P2P download from LAN peers'
     )
     install_parser.add_argument(
+        '--only-peers',
+        action='store_true',
+        help='Only download from LAN peers, no upstream mirrors'
+    )
+    install_parser.add_argument(
         '--force',
         action='store_true',
         help='Force install despite dependency problems or conflicts'
@@ -432,6 +462,11 @@ Examples:
         '--no-peers',
         action='store_true',
         help='Do not use P2P downloads from peers'
+    )
+    download_parser.add_argument(
+        '--only-peers',
+        action='store_true',
+        help='Only download from LAN peers, no upstream mirrors'
     )
     download_parser.add_argument(
         '--nodeps',
@@ -934,6 +969,11 @@ Examples:
         '--no-peers',
         action='store_true',
         help='Disable P2P download from LAN peers'
+    )
+    upgrade_parser.add_argument(
+        '--only-peers',
+        action='store_true',
+        help='Only download from LAN peers, no upstream mirrors'
     )
     upgrade_parser.add_argument(
         '--force',
@@ -5202,6 +5242,10 @@ def cmd_mirror_sync(args, db: PackageDatabase) -> int:
     failed = [r for r in dl_results if not r.success]
     print(f"\n{colors.bold('Done')}: {downloaded} downloaded, {cached} cached, {len(failed)} failed")
 
+    # Notify urpmd to invalidate cache index (so new downloads are visible to peers)
+    if downloaded > 0:
+        _notify_urpmd_cache_invalidate()
+
     if failed:
         print(colors.warning(f"\nFailed downloads:"))
         for r in failed[:10]:
@@ -6734,9 +6778,10 @@ def cmd_install(args, db: PackageDatabase) -> int:
     if download_items:
         print(colors.info("\nDownloading packages..."))
         use_peers = not getattr(args, 'no_peers', False)
+        only_peers = getattr(args, 'only_peers', False)
         from ..core.config import get_base_dir
         cache_dir = get_base_dir(urpm_root=getattr(args, 'urpm_root', None))
-        downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, db=db)
+        downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, only_peers=only_peers, db=db)
 
         # Multi-line progress display using DownloadProgressDisplay
         from . import display
@@ -6778,6 +6823,10 @@ def cmd_install(args, db: PackageDatabase) -> int:
             print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache in {time_str}")
         else:
             print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache in {time_str}")
+
+        # Notify urpmd to invalidate cache index (so new downloads are visible to peers)
+        if downloaded > 0:
+            _notify_urpmd_cache_invalidate()
 
     # Handle --download-only mode
     download_only = getattr(args, 'download_only', False)
@@ -7166,8 +7215,9 @@ def cmd_download(args, db: PackageDatabase) -> int:
     # Download packages
     print(colors.info("\nDownloading packages..."))
     use_peers = not getattr(args, 'no_peers', False)
+    only_peers = getattr(args, 'only_peers', False)
     cache_dir = get_base_dir(urpm_root=getattr(args, 'urpm_root', None))
-    downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, db=db)
+    downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, only_peers=only_peers, db=db)
 
     # Progress display
     from . import display
@@ -7207,6 +7257,10 @@ def cmd_download(args, db: PackageDatabase) -> int:
     print(f"  {downloaded} downloaded, {cached} from cache in {time_str}")
     if from_peers > 0:
         print(f"  P2P: {from_peers} from peers, {from_upstream} from upstream")
+
+    # Notify urpmd to invalidate cache index (so new downloads are visible to peers)
+    if downloaded > 0:
+        _notify_urpmd_cache_invalidate()
 
     print(colors.success(f"\nPackages saved to cache. Use 'urpm install' to install them."))
     return 0
@@ -8327,9 +8381,10 @@ def cmd_update(args, db: PackageDatabase) -> int:
 
         # Download
         use_peers = not getattr(args, 'no_peers', False)
+        only_peers = getattr(args, 'only_peers', False)
         from ..core.config import get_base_dir
         cache_dir = get_base_dir(urpm_root=getattr(args, 'urpm_root', None))
-        downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, db=db)
+        downloader = Downloader(cache_dir=cache_dir, use_peers=use_peers, only_peers=only_peers, db=db)
 
         # Multi-line progress display using DownloadProgressDisplay
         from . import display
@@ -8371,6 +8426,10 @@ def cmd_update(args, db: PackageDatabase) -> int:
             print(f"  {colors.success(f'{downloaded} downloaded')} ({from_peers} from peers, {from_upstream} from mirrors), {cache_str} from cache in {time_str}")
         else:
             print(f"  {colors.success(f'{downloaded} downloaded')}, {cache_str} from cache in {time_str}")
+
+        # Notify urpmd to invalidate cache index (so new downloads are visible to peers)
+        if downloaded > 0:
+            _notify_urpmd_cache_invalidate()
 
         rpm_paths = [r.path for r in dl_results if r.success and r.path]
     else:

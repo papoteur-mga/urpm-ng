@@ -423,7 +423,17 @@ class DownloadCoordinator:
                         if result.blacklist_peer:
                             self.mark_peer_failed(alt_peer, result.blacklist_peer.reason)
 
-            # Fall back to upstream - source will be set by download_one via callback
+            # Fall back to upstream - unless only_peers mode
+            if self.downloader.only_peers:
+                # Only peers mode: fail if no peer has the package
+                logger.debug(f"only_peers mode: skipping upstream for {item.filename}")
+                return DownloadResult(
+                    item=item,
+                    success=False,
+                    error="Not available from peers (--only-peers mode)"
+                )
+
+            # Download from upstream - source will be set by download_one via callback
             result = self.downloader.download_one(
                 item, progress_callback=progress_cb, worker_slot=slot,
                 start_callback=lambda source: self.start_download(
@@ -583,7 +593,8 @@ class Downloader:
     """Download manager for RPM packages."""
 
     def __init__(self, cache_dir: Path = None, max_workers: int = 4,
-                 use_peers: bool = True, db: 'PackageDatabase' = None,
+                 use_peers: bool = True, only_peers: bool = False,
+                 db: 'PackageDatabase' = None,
                  target_version: str = None, target_arch: str = None):
         """Initialize downloader.
 
@@ -591,6 +602,7 @@ class Downloader:
             cache_dir: Directory to store downloaded RPMs
             max_workers: Max parallel downloads
             use_peers: Whether to use P2P peer discovery for downloads
+            only_peers: If True, only download from peers (no upstream fallback)
             db: Database for provenance tracking and blacklist (optional)
             target_version: Target Mageia version for P2P queries (e.g., "10")
             target_arch: Target architecture for P2P queries (e.g., "x86_64")
@@ -598,7 +610,8 @@ class Downloader:
         self.cache_dir = cache_dir or get_base_dir()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_workers = max_workers
-        self.use_peers = use_peers
+        self.use_peers = use_peers or only_peers  # only_peers implies use_peers
+        self.only_peers = only_peers
         self.db = db
         self.target_version = target_version
         self.target_arch = target_arch

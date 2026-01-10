@@ -397,6 +397,18 @@ urpm peer unblacklist <host>  # Unblock a peer
 urpm peer clean               # Remove stale/offline peers from list
 ```
 
+### Local-only mode
+
+Use `--only-peers` to download exclusively from LAN peers without falling back to upstream mirrors:
+
+```bash
+urpm i --only-peers firefox   # Install only if available from peers
+urpm u --only-peers           # Upgrade only with packages from peers
+urpm download --only-peers pkg  # Download only from peers
+```
+
+This is useful for air-gapped networks or when you want to ensure all packages come from trusted local sources.
+
 ## Cache Management
 
 ```bash
