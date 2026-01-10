@@ -12,6 +12,8 @@ Provides a modern CLI with short aliases:
 """
 
 import argparse
+import shutil 
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -423,6 +425,105 @@ Examples:
         '--nodeps',
         action='store_true',
         help='Download only specified packages, no dependencies'
+    )
+
+    # =========================================================================
+    # mkimage - Create minimal Docker/Podman image for RPM builds
+    # =========================================================================
+    mkimage_parser = subparsers.add_parser(
+        'mkimage',
+        help='Create a minimal Docker/Podman image for RPM builds',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Create a minimal Mageia Docker/Podman image for RPM builds.
+
+The image contains a minimal system with urpmi configured to use
+the official Mageia mirrors. Use with 'urpm build' for isolated builds.
+
+Examples:
+  urpm mkimage --release 10 --tag mageia:10-build
+  urpm mkimage --release cauldron --tag mageia:cauldron-build --runtime podman
+'''
+    )
+    mkimage_parser.add_argument(
+        '--release', '-r',
+        required=True,
+        help='Mageia release (e.g., 10, cauldron)'
+    )
+    mkimage_parser.add_argument(
+        '--tag', '-t',
+        required=True,
+        help='Docker/Podman image tag (e.g., mageia:10-build)'
+    )
+    mkimage_parser.add_argument(
+        '--arch',
+        help='Target architecture (default: host arch)'
+    )
+    mkimage_parser.add_argument(
+        '--packages', '-p',
+        help='Additional packages to install (comma-separated)'
+    )
+    mkimage_parser.add_argument(
+        '--runtime',
+        choices=['docker', 'podman'],
+        help='Container runtime (default: auto-detect, prefers podman)'
+    )
+    mkimage_parser.add_argument(
+        '--keep-chroot',
+        action='store_true',
+        help='Keep temporary chroot directory after image creation'
+    )
+    mkimage_parser.add_argument(
+        '--workdir', '-w',
+        help='Working directory for chroot (default: /tmp)'
+    )
+
+    # =========================================================================
+    # build - Build RPM packages in isolated container
+    # =========================================================================
+    build_parser = subparsers.add_parser(
+        'build',
+        help='Build RPM package(s) in isolated container',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Build RPM packages in isolated containers.
+
+Each build runs in a fresh container that is destroyed after completion,
+ensuring a clean build environment. Results are copied to --output directory.
+
+Examples:
+  urpm build --image mageia:10-build ./foo-1.0-1.mga10.src.rpm
+  urpm build --image mageia:10-build ./foo.spec
+  urpm build --image mageia:10-build *.src.rpm --output ~/results/
+'''
+    )
+    build_parser.add_argument(
+        'sources', nargs='+',
+        help='Source RPM files (.src.rpm) or spec files (.spec) to build'
+    )
+    build_parser.add_argument(
+        '--image', '-i',
+        required=True,
+        help='Docker/Podman image to use for builds'
+    )
+    build_parser.add_argument(
+        '--output', '-o',
+        default='./build-output',
+        help='Output directory for built RPMs (default: ./build-output)'
+    )
+    build_parser.add_argument(
+        '--runtime',
+        choices=['docker', 'podman'],
+        help='Container runtime (default: auto-detect, prefers podman)'
+    )
+    build_parser.add_argument(
+        '--parallel', '-j',
+        type=int,
+        default=1,
+        help='Number of parallel builds (default: 1)'
+    )
+    build_parser.add_argument(
+        '--keep-container',
+        action='store_true',
+        help='Keep container after build (for debugging)'
     )
 
     # =========================================================================
@@ -6506,7 +6607,8 @@ def cmd_install(args, db: PackageDatabase) -> int:
                 last_shown[0] = name
 
         # Execute the queue
-        queue_result = queue.execute(progress_callback=queue_progress)
+        sync_mode = getattr(args, 'sync', False)
+        queue_result = queue.execute(progress_callback=queue_progress, sync=sync_mode)
 
         # Print done
         print(f"\r\033[K  [{len(rpm_paths)}/{len(rpm_paths)}] done")
@@ -6841,6 +6943,498 @@ def cmd_download(args, db: PackageDatabase) -> int:
     return 0
 
 
+def cmd_mkimage(args, db: PackageDatabase) -> int:
+    """Create a minimal Docker/Podman image for RPM builds."""
+    import argparse
+    import platform
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from ..core.container import detect_runtime, Container
+    from . import colors
+
+    release = args.release
+    arch = getattr(args, 'arch', None) or platform.machine()
+    tag = args.tag
+    keep_chroot = getattr(args, 'keep_chroot', False)
+    runtime_name = getattr(args, 'runtime', None)
+
+    # Detect container runtime
+    try:
+        runtime = detect_runtime(runtime_name)
+    except RuntimeError as e:
+        print(colors.error(str(e)))
+        return 1
+
+    container = Container(runtime)
+    print(f"Using {runtime.name} {runtime.version}")
+
+    # Check if image already exists
+    if container.image_exists(tag):
+        print(colors.error(f"\nError: Image '{tag}' already exists."))
+        print(f"\nTo replace it, first remove the existing image:")
+        print(f"  {runtime.name} rmi {tag}")
+        print(f"\nThen run mkimage again.")
+        return 1
+
+    # Base packages for build image
+    packages = [
+        'basesystem-minimal',
+        'vim-minimal',
+        'locales',
+        'locales-en',
+        'bash',
+        'rpm',
+        'curl',
+        'wget',
+        'cronie',
+        'urpmi',
+    ]
+
+    # Add extra packages if specified
+    extra_packages = getattr(args, 'packages', None)
+    if extra_packages:
+        packages.extend(extra_packages.split(','))
+
+    print(f"\nCreating image: {tag}")
+    print(f"  Release: {release}")
+    print(f"  Architecture: {arch}")
+    print(f"  Packages: {len(packages)}")
+
+    # Create temporary directory for chroot
+    workdir = getattr(args, 'workdir', None)
+    tmpdir = tempfile.mkdtemp(prefix='urpm-mkimage-', dir=workdir)
+    print(f"\nBuilding chroot in {tmpdir}...")
+
+    try:
+        # Create a PackageDatabase specific to the chroot
+        # This ensures media configuration is stored IN the chroot, not on the host
+        from ..core.database import PackageDatabase
+        chroot_db_path = Path(tmpdir) / "var/lib/urpm/packages.db"
+        chroot_db_path.parent.mkdir(parents=True, exist_ok=True)
+        chroot_db = PackageDatabase(db_path=chroot_db_path)
+
+        # 1. Initialize chroot with urpm
+        print("\n[1/5] Initializing chroot...")
+        init_args = argparse.Namespace(
+            urpm_root=tmpdir,
+            release=release,
+            arch=arch,
+            mirrorlist=None,
+            auto=True,
+            no_sync=False,
+        )
+        ret = cmd_init(init_args, chroot_db)
+        if ret != 0:
+            print(colors.error("Failed to initialize chroot"))
+            return ret
+
+        # 2. Install packages
+        print("\n[2/5] Installing packages...")
+        install_args = argparse.Namespace(
+            urpm_root=tmpdir,
+            root=tmpdir,
+            packages=packages,
+            auto=True,
+            without_recommends=True,
+            with_suggests=False,
+            download_only=False,
+            nodeps=False,
+            nosignature=False,
+            force=False,
+            reinstall=False,
+            debug=None,
+            watched=None,
+            prefer=None,
+            all=False,
+            test=False,
+            sync=True,  # Wait for all scriptlets to complete
+        )
+        ret = cmd_install(install_args, chroot_db)
+        if ret != 0:
+            print(colors.error("Failed to install packages"))
+            return ret
+
+        # 2.5. Install urpm (this project)
+        print("\n[2.5/5] Installing urpm...")
+
+        # First try from repos (for when it's officially available)
+        urpm_install_args = argparse.Namespace(
+            urpm_root=tmpdir,
+            root=tmpdir,
+            packages=['urpm'],
+            auto=True,
+            without_recommends=True,
+            with_suggests=False,
+            download_only=False,
+            nodeps=False,
+            nosignature=False,
+            force=False,
+            reinstall=False,
+            debug=None,
+            watched=None,
+            prefer=None,
+            all=False,
+            test=False,
+            sync=True,  # Wait for all scriptlets to complete
+        )
+        ret = cmd_install(urpm_install_args, chroot_db)
+
+        if ret != 0:
+            # urpm not in repos - look for local RPM
+            print("  urpm not found in repositories, looking for local RPM...")
+
+            # Search common locations
+            search_paths = [
+                Path.home() / 'Downloads',
+                Path('./rpmbuild/RPMS/noarch'),
+                Path.home() / 'rpmbuild/RPMS/noarch',
+                Path('.'),
+            ]
+
+            urpm_rpm = None
+            for search_path in search_paths:
+                if search_path.exists():
+                    candidates = list(search_path.glob('urpm-ng-*.noarch.rpm'))
+                    if candidates:
+                        # Take most recent
+                        urpm_rpm = max(candidates, key=lambda p: p.stat().st_mtime)
+                        break
+
+            if urpm_rpm:
+                default_path = str(urpm_rpm)
+                prompt = f"  Found: {default_path}\n  Press Enter to use, or provide another path: "
+            else:
+                default_path = ""
+                prompt = "  Path to urpm RPM file: "
+
+            user_input = input(prompt).strip()
+            rpm_path = Path(user_input) if user_input else (Path(default_path) if default_path else None)
+
+            if not rpm_path or not rpm_path.exists():
+                print(colors.error("No urpm RPM provided or file not found"))
+                print("  Build it with: make rpm")
+                return 1
+
+            # Install RPM using urpm with sync mode (waits for all scriptlets)
+            urpm_local_args = argparse.Namespace(
+                urpm_root=tmpdir,
+                root=tmpdir,
+                packages=[str(rpm_path.resolve())],
+                auto=True,
+                without_recommends=True,
+                with_suggests=False,
+                download_only=False,
+                nodeps=False,
+                nosignature=True,  # Local build, no signature
+                force=False,
+                reinstall=False,
+                debug=None,
+                watched=None,
+                prefer=None,
+                all=False,
+                test=False,
+                sync=True,  # Wait for all scriptlets to complete
+            )
+            ret = cmd_install(urpm_local_args, chroot_db)
+            if ret != 0:
+                print(colors.error(f"Failed to install urpm"))
+                return ret
+            print(colors.success(f"  Installed {rpm_path.name}"))
+        else:
+            print(colors.success("  urpm installed from repositories"))
+
+        # 3. Cleanup chroot to reduce image size
+        print("\n[3/5] Cleaning up chroot...")
+        # Close chroot database to flush all data before image creation
+        chroot_db.close()
+        _cleanup_chroot_for_image(tmpdir)
+
+        # 4. Unmount filesystems
+        print("\n[4/5] Unmounting filesystems...")
+        cleanup_args = argparse.Namespace(urpm_root=tmpdir)
+        cmd_cleanup(cleanup_args, db)
+
+        # 5. Create container image
+        print(f"\n[5/5] Creating container image {tag}...")
+        if not container.import_from_dir(tmpdir, tag):
+            print(colors.error("Failed to create container image"))
+            return 1
+
+        # Get image size
+        images = container.images(filter_name=tag)
+        size = images[0]['size'] if images else 'unknown'
+
+        print(colors.success(f"\n{'='*60}"))
+        print(colors.success(f"Image created successfully!"))
+        print(colors.success(f"{'='*60}"))
+        print(f"  Tag:  {tag}")
+        print(f"  Size: {size}")
+        print(f"\nUsage:")
+        print(f"  {runtime.name} run -it {tag} /bin/bash")
+        print(f"  urpm build --image {tag} ./package.src.rpm")
+
+        return 0
+
+    except Exception as e:
+        print(colors.error(f"Error: {e}"))
+        return 1
+
+    finally:
+        if not keep_chroot:
+            print(f"\nCleaning up temporary directory...")
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            print(f"\nChroot kept at: {tmpdir}")
+
+
+def _cleanup_chroot_for_image(root: str):
+    """Clean up chroot before creating container image.
+
+    Removes caches, logs, and temporary files to reduce image size.
+    """
+    import glob
+    import os
+    import shutil
+
+    cleanup_patterns = [
+        'var/cache/urpmi/*',
+        'var/cache/dnf/*',
+        'var/lib/urpm/medias/*/RPMS.*.cache',
+        'var/log/*',
+        'tmp/*',
+        'var/tmp/*',
+        'root/.bash_history',
+        'usr/share/doc/*',
+        'usr/share/man/*',
+        'usr/share/info/*',
+    ]
+
+    removed = 0
+    for pattern in cleanup_patterns:
+        for path in glob.glob(os.path.join(root, pattern)):
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed += 1
+                elif os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed += 1
+            except (IOError, OSError):
+                pass
+
+    print(f"  Removed {removed} cache/log entries")
+
+
+def cmd_build(args, db: PackageDatabase) -> int:
+    """Build RPM package(s) in isolated containers."""
+    from pathlib import Path
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from ..core.container import detect_runtime, Container
+    from . import colors
+
+    image = args.image
+    sources = args.sources
+    output_dir = Path(args.output)
+    parallel = getattr(args, 'parallel', 1)
+    keep_container = getattr(args, 'keep_container', False)
+    runtime_name = getattr(args, 'runtime', None)
+
+    # Detect container runtime
+    try:
+        runtime = detect_runtime(runtime_name)
+    except RuntimeError as e:
+        print(colors.error(str(e)))
+        return 1
+
+    container = Container(runtime)
+    print(f"Using {runtime.name} {runtime.version}")
+
+    # Check image exists
+    if not container.image_exists(image):
+        print(colors.error(f"Image not found: {image}"))
+        print(colors.dim("Create one with: urpm mkimage --release 10 --tag <tag>"))
+        return 1
+
+    # Validate sources
+    valid_sources = []
+    for source in sources:
+        source_path = Path(source)
+        if not source_path.exists():
+            print(colors.warning(f"Source not found: {source}"))
+            continue
+        if source_path.suffix not in ('.rpm', '.spec'):
+            print(colors.warning(f"Unsupported source type: {source}"))
+            continue
+        valid_sources.append(source_path)
+
+    if not valid_sources:
+        print(colors.error("No valid sources to build"))
+        return 1
+
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\nBuilding {len(valid_sources)} package(s)")
+    print(f"  Image:  {image}")
+    print(f"  Output: {output_dir}")
+    if parallel > 1:
+        print(f"  Parallel: {parallel}")
+
+    results = []
+
+    def build_one(source_path: Path) -> tuple:
+        """Build a single package. Returns (source, success, message)."""
+        return _build_single_package(
+            container, image, source_path, output_dir, keep_container
+        )
+
+    if parallel > 1 and len(valid_sources) > 1:
+        # Parallel builds
+        with ThreadPoolExecutor(max_workers=parallel) as executor:
+            futures = {executor.submit(build_one, src): src for src in valid_sources}
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                source, success, msg = result
+                status = colors.success("OK") if success else colors.error("FAIL")
+                print(f"  [{status}] {source.name}: {msg}")
+    else:
+        # Sequential builds
+        for source_path in valid_sources:
+            print(f"\n{'='*60}")
+            print(f"Building: {source_path.name}")
+            print(f"{'='*60}")
+            result = build_one(source_path)
+            results.append(result)
+
+    # Summary
+    success_count = sum(1 for _, ok, _ in results if ok)
+    fail_count = len(results) - success_count
+
+    print(f"\n{'='*60}")
+    print("Build Summary")
+    print(f"{'='*60}")
+    print(f"  Success: {success_count}")
+    print(f"  Failed:  {fail_count}")
+    print(f"  Output:  {output_dir}")
+
+    if fail_count > 0:
+        print(f"\nFailed packages:")
+        for source, success, msg in results:
+            if not success:
+                print(f"  {colors.error('X')} {source.name}: {msg}")
+
+    return 0 if fail_count == 0 else 1
+
+
+def _build_single_package(
+    container: 'Container',
+    image: str,
+    source_path: 'Path',
+    output_dir: 'Path',
+    keep_container: bool
+) -> tuple:
+    """Build a single package in a container.
+
+    Returns:
+        Tuple of (source_path, success, message)
+    """
+    from pathlib import Path
+    from . import colors
+
+    cid = None
+    try:
+        # 1. Start fresh container with host network (for urpmd P2P access)
+        cid = container.run(
+            image,
+            ['sleep', 'infinity'],
+            detach=True,
+            rm=False,
+            network='host'
+        )
+        print(f"  Container: {cid[:12]}")
+
+        # Create build directory
+        container.exec(cid, ['mkdir', '-p', '/build'])
+
+        # 2. Copy source into container
+        print(f"  Copying source...")
+        if not container.cp(str(source_path), f"{cid}:/build/"):
+            return (source_path, False, "Failed to copy source")
+
+        # 3. Determine spec file path
+        if source_path.suffix == '.rpm' and '.src.' in source_path.name:
+            # Source RPM - install it to get spec
+            print(f"  Installing SRPM...")
+            result = container.exec(cid, [
+                'rpm', '-ivh', f'/build/{source_path.name}'
+            ])
+            if result.returncode != 0:
+                return (source_path, False, f"SRPM install failed: {result.stderr}")
+
+            # Find spec file (name without version-release.src.rpm)
+            # e.g., foo-1.0-1.mga10.src.rpm -> foo.spec
+            name_parts = source_path.stem.replace('.src', '').rsplit('-', 2)
+            spec_name = name_parts[0] + '.spec'
+            spec_path = f'/root/rpmbuild/SPECS/{spec_name}'
+        else:
+            # Spec file directly
+            spec_path = f'/build/{source_path.name}'
+
+        # 4. Install build dependencies
+        print(f"  Installing BuildRequires...")
+        result = container.exec(cid, [
+            'urpmi', '--auto', '--buildrequires', spec_path
+        ])
+        if result.returncode != 0:
+            # Try with dnf/yum builddep as fallback
+            result = container.exec(cid, [
+                'dnf', 'builddep', '-y', spec_path
+            ])
+            if result.returncode != 0:
+                return (source_path, False, f"BuildRequires install failed")
+
+        # 5. Build the package
+        print(f"  Building...")
+        result = container.exec_stream(cid, [
+            'rpmbuild', '-ba', spec_path
+        ])
+        if result != 0:
+            return (source_path, False, "rpmbuild failed")
+
+        # 6. Copy results out
+        print(f"  Retrieving results...")
+        pkg_output = output_dir / source_path.stem.replace('.src', '')
+        pkg_output.mkdir(parents=True, exist_ok=True)
+
+        # Copy RPMS
+        rpms_dir = pkg_output / 'RPMS'
+        rpms_dir.mkdir(exist_ok=True)
+        container.cp(f"{cid}:/root/rpmbuild/RPMS/.", str(rpms_dir))
+
+        # Copy SRPMS
+        srpms_dir = pkg_output / 'SRPMS'
+        srpms_dir.mkdir(exist_ok=True)
+        container.cp(f"{cid}:/root/rpmbuild/SRPMS/.", str(srpms_dir))
+
+        # Count built packages
+        rpm_count = len(list(rpms_dir.rglob('*.rpm')))
+        srpm_count = len(list(srpms_dir.rglob('*.rpm')))
+
+        return (source_path, True, f"{rpm_count} RPMs, {srpm_count} SRPMs -> {pkg_output}")
+
+    except Exception as e:
+        return (source_path, False, str(e))
+
+    finally:
+        # Always cleanup container unless --keep-container
+        if cid and not keep_container:
+            container.rm(cid)
+
+
 def cmd_erase(args, db: PackageDatabase) -> int:
     """Handle erase (remove) command."""
     import platform
@@ -7066,7 +7660,8 @@ def cmd_erase(args, db: PackageDatabase) -> int:
                 last_erase_shown[0] = name
 
         # Execute the queue
-        queue_result = queue.execute(progress_callback=queue_progress)
+        sync_mode = getattr(args, 'sync', False)
+        queue_result = queue.execute(progress_callback=queue_progress, sync=sync_mode)
 
         # Print done
         print(f"\r\033[K  [{len(packages_to_erase)}/{len(packages_to_erase)}] done")
@@ -7519,7 +8114,8 @@ def cmd_update(args, db: PackageDatabase) -> int:
                 last_shown[0] = name
 
         # Execute the queue - all operations run sequentially in one process
-        queue_result = queue.execute(progress_callback=queue_progress)
+        sync_mode = getattr(args, 'sync', False)
+        queue_result = queue.execute(progress_callback=queue_progress, sync=sync_mode)
 
         # Clear the line after last progress
         print(f"\r\033[K", end='')
@@ -8281,7 +8877,8 @@ def cmd_autoremove(args, db: PackageDatabase) -> int:
                 last_erase_shown[0] = name
 
         # Execute the queue
-        queue_result = queue.execute(progress_callback=queue_progress)
+        sync_mode = getattr(args, 'sync', False)
+        queue_result = queue.execute(progress_callback=queue_progress, sync=sync_mode)
 
         # Print done
         print(f"\r\033[K  [{len(package_names)}/{len(package_names)}] done")
@@ -9668,7 +10265,8 @@ def cmd_cleandeps(args, db: PackageDatabase) -> int:
                 last_erase_shown[0] = name
 
         # Execute the queue
-        queue_result = queue.execute(progress_callback=queue_progress)
+        sync_mode = getattr(args, 'sync', False)
+        queue_result = queue.execute(progress_callback=queue_progress, sync=sync_mode)
 
         # Print done
         print(f"\r\033[K  [{len(packages_to_erase)}/{len(packages_to_erase)}] done")
@@ -11758,6 +12356,12 @@ def main(argv=None) -> int:
 
         elif args.command in ('download', 'dl'):
             return cmd_download(args, db)
+
+        elif args.command == 'mkimage':
+            return cmd_mkimage(args, db)
+
+        elif args.command == 'build':
+            return cmd_build(args, db)
 
         elif args.command in ('erase', 'e'):
             return cmd_erase(args, db)

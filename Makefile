@@ -9,6 +9,7 @@ BM = /usr/bin/bm
 
 version:
 	$(SED) -i 's/^__version__ = .*/__version__ = "$(VERSION)"/' urpm/__init__.py
+	$(SED) -i 's/^version = .*/version = "$(VERSION)"/' pyproject.toml
 
 tarball: version
 	$(SED) -i 's/^%define version.*/%define version $(VERSION)/' rpmbuild/SPECS/$(NAME).spec

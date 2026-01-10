@@ -219,7 +219,8 @@ class TransactionQueue:
 
     def execute(
         self,
-        progress_callback: Callable[[str, str, int, int], None] = None
+        progress_callback: Callable[[str, str, int, int], None] = None,
+        sync: bool = False
     ) -> QueueResult:
         """Execute all queued operations sequentially.
 
@@ -228,6 +229,9 @@ class TransactionQueue:
 
         Args:
             progress_callback: Called with (operation_id, name, current, total)
+            sync: If True, wait for all operations to complete including
+                  background scriptlets. Use for chroot installs where the
+                  filesystem will be modified immediately after.
 
         Returns:
             QueueResult with results for each operation
@@ -249,7 +253,7 @@ class TransactionQueue:
 
         if pid > 0:
             # Parent process
-            return self._parent_process(read_fd, write_fd, progress_callback)
+            return self._parent_process(read_fd, write_fd, progress_callback, sync, pid)
         else:
             # Child process - never returns
             self._child_process(read_fd, write_fd)
@@ -258,7 +262,9 @@ class TransactionQueue:
         self,
         read_fd: int,
         write_fd: int,
-        progress_callback: Callable[[str, str, int, int], None]
+        progress_callback: Callable[[str, str, int, int], None],
+        sync: bool,
+        child_pid: int
     ) -> QueueResult:
         """Parent: read progress messages and build result."""
         os.close(write_fd)
@@ -315,7 +321,9 @@ class TransactionQueue:
 
                 elif msg.msg_type == 'parent_can_exit':
                     # Parent can exit, child continues with background ops
-                    break
+                    if not sync:
+                        break
+                    # In sync mode, keep waiting for queue_done
 
                 elif msg.msg_type == 'queue_done':
                     # All operations complete
@@ -328,6 +336,16 @@ class TransactionQueue:
 
         finally:
             read_file.close()
+
+        # In sync mode, wait for child process and all its descendants
+        if sync:
+            try:
+                os.waitpid(child_pid, 0)
+            except ChildProcessError:
+                pass
+            # Also wait for any grandchildren (scriptlets)
+            from .install import wait_rpm_children
+            wait_rpm_children()
 
         all_success = all(r.success for r in results) and not overall_error
         return QueueResult(
@@ -467,7 +485,7 @@ class TransactionQueue:
         erase_names = getattr(op, 'erase_names', [])
         errors = []
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         if op.verify_signatures:
             ts.setVSFlags(0)
@@ -675,7 +693,7 @@ class TransactionQueue:
         package_names = op.targets
         errors = []
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
         ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)
 
         # Find installed packages

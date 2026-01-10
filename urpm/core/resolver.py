@@ -322,7 +322,7 @@ class Resolver:
                 if self.root:
                     # Use rpm module to read from chroot's rpmdb
                     import rpm
-                    ts = rpm.TransactionSet(self.root)
+                    ts = rpm.TransactionSet(self.root or '/')
                     ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES | rpm._RPMVSF_NODIGESTS)
 
                     # Map RPM flags to libsolv relation flags
@@ -560,7 +560,7 @@ class Resolver:
             return 0
 
         count = 0
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         # Iterate over all installed packages
         for hdr in ts.dbMatch():
@@ -2285,7 +2285,7 @@ class Resolver:
             'nss-softokn', 'nss-sysinit', 'p11-kit', 'p11-kit-trust',
         }
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         # Build complete picture of installed packages
         installed_pkgs = {}  # name -> {provides: set, requires: set, hdr: header}
@@ -2532,7 +2532,7 @@ class Resolver:
             # No tracking file or empty - can't determine orphans reliably
             return []
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         # Build package info and reverse dependency map
         installed_pkgs = {}  # name -> {provides, hdr}
@@ -2653,7 +2653,7 @@ class Resolver:
         orphans = []
 
         # Get all installed packages and their reverse deps
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         # Build a map of what each package requires
         required_by = {}  # package_name -> set of packages that need it
@@ -2758,7 +2758,7 @@ class Resolver:
         if not unrequested:
             return []
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         # Step 1: Collect old requires and new requires for upgraded packages
         old_requires = set()  # Base capability names from old packages
@@ -2904,7 +2904,7 @@ class Resolver:
         # Get packages installed as dependencies (not explicitly requested)
         unrequested = self._get_unrequested_packages()
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         # Build maps for all installed packages
         pkg_provides = {}  # name -> set of capability names

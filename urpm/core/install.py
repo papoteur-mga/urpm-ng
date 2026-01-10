@@ -7,11 +7,43 @@ Handles package installation using python3-rpm bindings.
 import logging
 import os
 import rpm
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def wait_rpm_children(timeout: int = 120):
+    """Wait for all child processes to finish.
+
+    RPM scriptlets and file triggers may fork child processes.
+    Call this after installation when you need to ensure everything
+    is complete before continuing (e.g., before deleting a chroot).
+
+    Args:
+        timeout: Maximum seconds to wait
+    """
+    start = time.time()
+
+    while time.time() - start < timeout:
+        try:
+            # Wait for any child process, non-blocking
+            pid, status = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                # No children ready right now
+                time.sleep(0.1)
+                pid, status = os.waitpid(-1, os.WNOHANG)
+                if pid == 0:
+                    # Still no children, we're done
+                    break
+        except ChildProcessError:
+            # No child processes - we're done
+            break
+
+    # Final sync to ensure all writes are flushed
+    os.sync()
 
 
 @dataclass
@@ -71,7 +103,7 @@ class Installer:
         if not rpm_paths:
             return InstallResult(success=True, installed=0)
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         if verify_signatures:
             # Verify all signatures and digests
@@ -253,7 +285,7 @@ class Installer:
         provides = {}  # capability -> package name
         requires = {}  # package name -> set of required capabilities
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
         ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)  # Skip sig check for sorting
 
         for path in rpm_paths:
@@ -329,7 +361,7 @@ class Installer:
         provides = {}  # capability -> provider package name
         requires = {}  # package name -> set of required capabilities
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
         ts.setVSFlags(rpm._RPMVSF_NOSIGNATURES)
 
         for path in rpm_paths:
@@ -435,7 +467,7 @@ class Installer:
         if not package_names:
             return EraseResult(success=True, erased=0)
 
-        ts = rpm.TransactionSet(self.root)
+        ts = rpm.TransactionSet(self.root or '/')
 
         errors = []
         total = len(package_names)
