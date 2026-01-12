@@ -184,7 +184,11 @@ def download_from_server(url: str, dest: Path, server: dict,
     if is_local_server(server):
         # Local file copy
         try:
-            source_path = Path(url)
+            # Extract path from file:// URL
+            if url.startswith('file://'):
+                source_path = Path(url[7:])  # Remove 'file://'
+            else:
+                source_path = Path(url)
             if not source_path.exists():
                 return DownloadResult(success=False, error=f"File not found: {url}")
 
