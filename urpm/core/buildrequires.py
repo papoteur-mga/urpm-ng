@@ -87,7 +87,7 @@ def parse_buildrequires_from_spec(spec_path: Path) -> List[str]:
         spec_path: Path to the .spec file.
 
     Returns:
-        List of build requirement names (package names only, no versions).
+        List of build requirements with version constraints (e.g., "pkg >= 1.0").
 
     Raises:
         FileNotFoundError: If spec file doesn't exist.
@@ -100,6 +100,13 @@ def parse_buildrequires_from_spec(spec_path: Path) -> List[str]:
 
     requirements = []
 
+    # Regex to parse a single dependency with optional version constraint
+    # Matches: name, name >= version, name(arch) >= version, etc.
+    dep_pattern = re.compile(
+        r'^([a-zA-Z0-9_+.-]+(?:\([^)]+\))?)'  # Package name (with optional arch like (x86-64))
+        r'(?:\s*(>=|<=|>|<|=)\s*([^\s,#]+))?'  # Optional: operator and version
+    )
+
     with open(spec_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             line = line.strip()
@@ -107,28 +114,64 @@ def parse_buildrequires_from_spec(spec_path: Path) -> List[str]:
             if line.lower().startswith('buildrequires:'):
                 # Extract the part after BuildRequires:
                 deps_part = line.split(':', 1)[1].strip()
-                # Split by comma or whitespace for multiple deps on one line
-                # Handle version constraints like "pkg >= 1.0" - extract just pkg name
-                skip_token = False
-                for dep in re.split(r'[,\s]+', deps_part):
-                    if skip_token:
-                        skip_token = False
-                        continue
-                    dep = dep.strip()
-                    if not dep or dep.startswith('#'):
-                        continue
-                    # Skip version operators and numbers
-                    if dep in ('>=', '<=', '>', '<', '=', '=='):
-                        skip_token = True
-                        continue
-                    if re.match(r'^[\d.]+$', dep):
+                # Remove comments
+                if '#' in deps_part:
+                    deps_part = deps_part.split('#')[0].strip()
+
+                # Split by comma for multiple deps on one line
+                for dep_str in re.split(r'\s*,\s*', deps_part):
+                    dep_str = dep_str.strip()
+                    if not dep_str:
                         continue
                     # Skip macros we can't resolve
-                    if dep.startswith('%'):
+                    if dep_str.startswith('%'):
                         continue
-                    requirements.append(dep)
+
+                    # Parse the dependency
+                    match = dep_pattern.match(dep_str)
+                    if match:
+                        name, op, version = match.groups()
+                        if op and version:
+                            # Normalize operator (= -> ==)
+                            if op == '=':
+                                op = '=='
+                            requirements.append(f"{name} {op} {version}")
+                        else:
+                            requirements.append(name)
 
     return list(dict.fromkeys(requirements))  # Remove duplicates, preserve order
+
+
+def rpm_dep_to_solver_format(dep: str) -> str:
+    """Convert RPM dependency format to solver format.
+
+    RPM format: "name >= 1.0" or "name"
+    Solver format: "name[>= 1.0]" or "name"
+
+    Args:
+        dep: Dependency string in RPM format.
+
+    Returns:
+        Dependency string in solver format.
+    """
+    import re
+
+    # Match: name (>= | <= | > | < | = | ==) version
+    match = re.match(
+        r'^([a-zA-Z0-9_+.-]+(?:\([^)]+\))?)'  # Package name
+        r'\s+(>=|<=|>|<|==|=)\s+'              # Operator
+        r'(.+)$',                              # Version
+        dep.strip()
+    )
+
+    if match:
+        name, op, version = match.groups()
+        # Normalize = to ==
+        if op == '=':
+            op = '=='
+        return f"{name}[{op} {version}]"
+
+    return dep.strip()
 
 
 def parse_buildrequires_from_srpm(srpm_path: Path) -> List[str]:

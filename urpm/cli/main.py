@@ -6107,7 +6107,7 @@ def cmd_install(args, db: PackageDatabase) -> int:
     # Handle --builddeps option (install build dependencies from spec/SRPM)
     builddeps = getattr(args, 'builddeps', None)
     if builddeps:
-        from ..core.buildrequires import get_buildrequires, list_specs_in_workdir
+        from ..core.buildrequires import get_buildrequires, list_specs_in_workdir, rpm_dep_to_solver_format
 
         try:
             if builddeps == 'AUTO':
@@ -6139,8 +6139,8 @@ def cmd_install(args, db: PackageDatabase) -> int:
             print(colors.info(f"Build dependencies from: {source}"))
             print(f"  Found {len(reqs)} BuildRequires")
 
-            # Replace packages list with build requirements
-            args.packages = list(reqs)
+            # Replace packages list with build requirements (convert to solver format)
+            args.packages = [rpm_dep_to_solver_format(req) for req in reqs]
 
         except FileNotFoundError as e:
             print(colors.error(f"Error: {e}"))
@@ -7012,7 +7012,7 @@ def cmd_download(args, db: PackageDatabase) -> int:
     # Handle --builddeps option
     builddeps = getattr(args, 'builddeps', None)
     if builddeps:
-        from ..core.buildrequires import get_buildrequires, list_specs_in_workdir
+        from ..core.buildrequires import get_buildrequires, list_specs_in_workdir, rpm_dep_to_solver_format
 
         try:
             if builddeps == 'AUTO':
@@ -7044,7 +7044,8 @@ def cmd_download(args, db: PackageDatabase) -> int:
             reqs, source = get_buildrequires(target)
             print(colors.info(f"Build dependencies from: {source}"))
             print(f"  Found {len(reqs)} BuildRequires")
-            packages.extend(reqs)
+            # Convert to solver format and add to packages
+            packages.extend(rpm_dep_to_solver_format(req) for req in reqs)
 
         except FileNotFoundError as e:
             print(colors.error(f"Error: {e}"))
