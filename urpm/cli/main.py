@@ -4218,11 +4218,11 @@ def cmd_media_autoconfig(args, db: PackageDatabase) -> int:
             )
             print(f"  Added media: {media_name}")
 
-            # Link media to server
-            if server_to_use:
-                media = db.get_media(media_name)
-                if media:
-                    db.link_media_to_server(media['id'], server_to_use['id'])
+            # Link media to all enabled servers
+            media = db.get_media(media_name)
+            if media:
+                for server in db.list_servers(enabled_only=True):
+                    db.link_server_media(server['id'], media['id'])
 
         added += 1
 
