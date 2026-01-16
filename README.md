@@ -375,6 +375,13 @@ urpm server test [name]       # Test connectivity and detect IP mode
 urpm server ip-mode <name> <mode>  # Set IP mode (auto/ipv4/ipv6/dual)
 ```
 
+### Server list
+
+Options for urpm server list:
+```bash
+--all                 # Show all servers including those disabled
+```
+
 ### IP Mode
 
 Each server has an IP mode to handle IPv4/IPv6 connectivity:

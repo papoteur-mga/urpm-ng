@@ -140,8 +140,10 @@ _solver_debug = SolverDebug()
 
 def set_solver_debug(enabled: bool = False, watched: List[str] = None):
     """Set global solver debug options."""
-    global _solver_debug
+    global _solver_debug, DEBUG_RESOLVER
     _solver_debug = SolverDebug(enabled=enabled, watched=watched)
+    if enabled:
+        DEBUG_RESOLVER = True
 
 
 def get_solver_debug() -> SolverDebug:
@@ -2893,7 +2895,7 @@ class Resolver:
         Args:
             erase_names: List of package names being erased (including reverse deps)
             erase_recommends: If True, RECOMMENDS don't block removal (only REQUIRES do)
-            keep_suggests: If True, SUGGESTS also block removal (like RECOMMENDS)
+            keep_suggests: If True, SUGGESTS also block removal
 
         Returns:
             List of PackageAction for packages that will become orphans
@@ -2976,60 +2978,42 @@ class Resolver:
                     deps.add(provider)
             return deps
 
-        # Helper: get deps including recommends and suggests (for dep_tree building)
+        # Helper: get deps including recommends (for dep_tree building)
+        # Note: SUGGESTS are NOT followed because they are not installed by default
         def get_all_deps(pkg_name: str) -> set:
-            """Get packages that pkg_name depends on, recommends, or suggests."""
+            """Get packages that pkg_name depends on or recommends (not suggests)."""
             deps = set()
             # REQUIRES
             for cap in pkg_requires.get(pkg_name, set()):
                 provider = resolve_cap_to_pkg(cap)
                 if provider and provider != pkg_name:
                     deps.add(provider)
-            # RECOMMENDS
+            # RECOMMENDS (installed by default)
             for cap in pkg_recommends.get(pkg_name, set()):
                 provider = resolve_cap_to_pkg(cap)
                 if provider and provider != pkg_name:
                     deps.add(provider)
-            # SUGGESTS
-            for cap in pkg_suggests.get(pkg_name, set()):
-                provider = resolve_cap_to_pkg(cap)
-                if provider and provider != pkg_name:
-                    deps.add(provider)
+            # SUGGESTS are NOT followed - they are not installed by default
             return deps
 
-        # Helper: get reverse dependencies of a package (as package names)
-        def get_reverse_deps(pkg_name: str) -> dict:
-            """Get packages that depend on pkg_name (respecting erase_recommends/keep_suggests).
-
-            Default: REQUIRES + RECOMMENDS block removal, SUGGESTS does NOT
-            erase_recommends=True: only REQUIRES blocks removal
-            keep_suggests=True: REQUIRES + RECOMMENDS + SUGGESTS all block removal
-
-            Returns: dict of {pkg_name: dep_type} where dep_type is 'R', 'M', or 'S'
-            """
-            rdeps = {}  # pkg_name -> dep_type ('R'equires, 'M'=recoMmends, 'S'uggests)
-            my_provides = pkg_provides.get(pkg_name, set())
-            for other_name in all_installed:
-                if other_name == pkg_name:
-                    continue
-                other_requires = pkg_requires.get(other_name, set())
-                other_recommends = pkg_recommends.get(other_name, set())
-                other_suggests = pkg_suggests.get(other_name, set())
-                # Check if other_name requires, recommends, or suggests any capability that pkg_name provides
-                for cap in my_provides:
-                    # REQUIRES always blocks removal
-                    if cap in other_requires:
-                        rdeps[other_name] = 'R'
-                        break
-                    # RECOMMENDS blocks removal unless --erase-recommends is set
-                    if not erase_recommends and cap in other_recommends:
-                        rdeps[other_name] = 'M'
-                        break
-                    # SUGGESTS blocks removal only if --keep-suggests is set
-                    if keep_suggests and cap in other_suggests:
-                        rdeps[other_name] = 'S'
-                        break
-            return rdeps
+        # Build reverse index: capability -> list of (pkg_that_needs_it, dep_type)
+        # This is much faster than iterating all packages for each candidate
+        cap_needed_by = {}  # cap -> [(pkg, dep_type), ...]
+        for pkg_name in all_installed:
+            for cap in pkg_requires.get(pkg_name, set()):
+                if cap not in cap_needed_by:
+                    cap_needed_by[cap] = []
+                cap_needed_by[cap].append((pkg_name, 'R'))
+            if not erase_recommends:
+                for cap in pkg_recommends.get(pkg_name, set()):
+                    if cap not in cap_needed_by:
+                        cap_needed_by[cap] = []
+                    cap_needed_by[cap].append((pkg_name, 'M'))
+            if keep_suggests:
+                for cap in pkg_suggests.get(pkg_name, set()):
+                    if cap not in cap_needed_by:
+                        cap_needed_by[cap] = []
+                    cap_needed_by[cap].append((pkg_name, 'S'))
 
         # Normalize erase_names to original case
         erase_set_original = set()
@@ -3105,35 +3089,54 @@ class Resolver:
                 pass
 
         # Orphan detection algorithm:
-        # A package can be removed if ALL its reverse deps are also being removed.
-        # We iteratively remove packages from candidates that have rdeps outside candidates.
+        # A package can be removed if ALL its reverse deps are also being removed,
+        # OR if there are other providers of the required capability that remain.
+        # We iteratively remove packages from candidates that have blocking rdeps.
 
         candidates = set(to_remove)
         candidates_lower = {p.lower() for p in candidates}
-        removed_from_candidates = {}  # For debug: pkg -> (blocker, dep_type)
+        removed_from_candidates = {}  # For debug: pkg -> (blocker, dep_type, capability)
 
-        # Iterate until stable
+        # Iterate until stable (use sorted for determinism)
         changed = True
         iteration = 0
         while changed:
             changed = False
             iteration += 1
-            for pkg_name in list(candidates):
+            for pkg_name in sorted(candidates):
                 if pkg_name in erase_set_original:
                     continue  # Always remove explicitly requested packages
 
-                rdeps = get_reverse_deps(pkg_name)  # dict: pkg -> dep_type
-
-                for rdep, dep_type in rdeps.items():
-                    rdep_lower = rdep.lower()
-                    # Package must stay if it has a rdep that will remain installed.
-                    # A rdep remains installed if it's NOT in candidates.
-                    if rdep_lower not in candidates_lower:
-                        candidates.remove(pkg_name)
-                        candidates_lower.remove(pkg_name.lower())
-                        removed_from_candidates[pkg_name] = (rdep, dep_type)
-                        changed = True
+                # Check if any package outside candidates needs a capability we provide
+                # and we are the only remaining provider
+                dominated = False
+                blocker_info = None
+                for cap in pkg_provides.get(pkg_name, set()):
+                    for dependent, dep_type in cap_needed_by.get(cap, []):
+                        if dependent == pkg_name:
+                            continue
+                        dep_lower = dependent.lower()
+                        # Skip if dependent is also being removed
+                        if dep_lower in candidates_lower:
+                            continue
+                        # dependent needs cap and is NOT being removed
+                        # Check if there are other providers that remain
+                        providers = cap_to_pkg.get(cap, set())
+                        remaining = [p for p in providers
+                                     if p != pkg_name and p.lower() not in candidates_lower]
+                        if not remaining:
+                            # No other provider - this blocks removal
+                            dominated = True
+                            blocker_info = (dependent, dep_type, cap)
+                            break
+                    if dominated:
                         break
+
+                if dominated:
+                    candidates.remove(pkg_name)
+                    candidates_lower.remove(pkg_name.lower())
+                    removed_from_candidates[pkg_name] = blocker_info
+                    changed = True
 
         to_remove = candidates
 
@@ -3147,8 +3150,8 @@ class Resolver:
                     f.write(f"Final to_remove: {len(to_remove)}\n\n")
                     f.write(f"Packages that must stay (R=Requires, M=Recommends, S=Suggests):\n")
                     for pkg in sorted(removed_from_candidates.keys()):
-                        blocker, dep_type = removed_from_candidates[pkg]
-                        f.write(f"  {pkg} <-[{dep_type}]- {blocker}\n")
+                        blocker, dep_type, cap = removed_from_candidates[pkg]
+                        f.write(f"  {pkg} <-[{dep_type}]- {blocker} (via {cap})\n")
             except:
                 pass
 

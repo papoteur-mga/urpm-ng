@@ -620,6 +620,11 @@ Examples:
         action='store_true',
         help='Keep packages suggested by remaining packages'
     )
+    erase_parser.add_argument(
+        '--debug',
+        choices=['solver', 'all'],
+        help='Enable debug output (solver, all)'
+    )
 
     # =========================================================================
     # search / s / query / q
@@ -7861,7 +7866,7 @@ def cmd_erase(args, db: PackageDatabase) -> int:
     import platform
     import signal
 
-    from ..core.resolver import Resolver, format_size
+    from ..core.resolver import Resolver, format_size, set_solver_debug
     from ..core.install import check_root
     from ..core.background_install import (
         check_background_error, clear_background_error,
@@ -7897,6 +7902,11 @@ def cmd_erase(args, db: PackageDatabase) -> int:
     if not check_root():
         print(colors.error("Error: erase requires root privileges"))
         return 1
+
+    # Set up solver debug if requested
+    debug_solver = getattr(args, 'debug', None) in ('solver', 'all')
+    if debug_solver:
+        set_solver_debug(enabled=True)
 
     # Resolve what to remove
     resolver = _create_resolver(db, args)
