@@ -6,6 +6,32 @@
 
 ---
 
+## Récemment implémenté (v0.1.22)
+
+### Package holds
+- [x] `urpm hold <package>` - verrouiller un paquet
+- [x] `urpm unhold <package>` - déverrouiller
+- [x] `urpm hold` (sans args) - lister les paquets verrouillés
+- [x] Option `-r/--reason` pour documenter la raison du hold
+- [x] Protection contre les upgrades ET les obsoletes
+
+### Obsoletes detection dans upgrade
+- [x] `urpm upgrade` détecte les paquets disponibles qui obsolètent des paquets installés
+- [x] Propose automatiquement le remplacement (ex: dhcpcd remplaçant dhcp-client)
+- [x] Respecte les holds - les paquets verrouillés ne sont pas remplacés
+- [x] Affichage des warnings pour les paquets held qui seraient obsolétés
+
+### urpm info amélioré
+- [x] Affichage des Recommends, Suggests, Conflicts, Obsoletes
+- [x] Information complète sur les dépendances
+
+### Filtrage par version système
+- [x] Les requêtes DB filtrent par version Mageia du système
+- [x] Évite de retourner des paquets mga9 sur un système mga10
+- [x] Affecte `urpm info`, `urpm search`, et toutes les requêtes
+
+---
+
 ## En cours
 
 ### Clarification update/upgrade (style apt)
@@ -229,7 +255,7 @@ juste parce que la branche pipewire est cassée. pipewire-libs peut
 ## Phase différée (entreprise)
 
 - [ ] Infrastructure advisories (MGASA)
-- [ ] versionlock
+- [x] versionlock → implémenté via `urpm hold/unhold` (v0.1.22)
 - [ ] downgrade
 - [ ] APIs sécurisées (/api/upgrade, /api/install)
 - [ ] Gestion de parc (inventaire, déploiement)
