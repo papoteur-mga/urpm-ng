@@ -1591,6 +1591,9 @@ class PackageDatabase:
     def search(self, pattern: str, limit: int = None, search_provides: bool = False) -> List[Dict]:
         """Search packages by name pattern, optionally also in provides.
 
+        Filters by system version to avoid returning packages from other
+        Mageia versions (e.g., mga9 packages on a mga10 system).
+
         Args:
             pattern: Search pattern (case-insensitive substring match)
             limit: Maximum results to return (None = no limit)
@@ -1599,26 +1602,41 @@ class PackageDatabase:
         Returns:
             List of package dicts. If found via provides, includes 'matched_provide' key.
         """
+        from .config import get_system_version
+        system_version = get_system_version()
+
         pattern_lower = f'%{pattern.lower()}%'
         results = []
         seen_ids = set()
 
+        # Build version filter
+        if system_version:
+            version_join = "JOIN media m ON p.media_id = m.id"
+            version_filter = "AND m.mageia_version = ?"
+            base_params = (pattern_lower, system_version)
+        else:
+            version_join = ""
+            version_filter = ""
+            base_params = (pattern_lower,)
+
         # Search by name
         if limit:
-            cursor = self.conn.execute("""
-                SELECT id, name, version, release, arch, nevra, summary, size
-                FROM packages
-                WHERE name_lower LIKE ?
-                ORDER BY name_lower
+            cursor = self.conn.execute(f"""
+                SELECT p.id, p.name, p.version, p.release, p.arch, p.nevra, p.summary, p.size
+                FROM packages p
+                {version_join}
+                WHERE p.name_lower LIKE ? {version_filter}
+                ORDER BY p.name_lower
                 LIMIT ?
-            """, (pattern_lower, limit))
+            """, base_params + (limit,))
         else:
-            cursor = self.conn.execute("""
-                SELECT id, name, version, release, arch, nevra, summary, size
-                FROM packages
-                WHERE name_lower LIKE ?
-                ORDER BY name_lower
-            """, (pattern_lower,))
+            cursor = self.conn.execute(f"""
+                SELECT p.id, p.name, p.version, p.release, p.arch, p.nevra, p.summary, p.size
+                FROM packages p
+                {version_join}
+                WHERE p.name_lower LIKE ? {version_filter}
+                ORDER BY p.name_lower
+            """, base_params)
 
         for row in cursor:
             pkg = dict(row)
@@ -1629,24 +1647,26 @@ class PackageDatabase:
         if search_provides and (limit is None or len(results) < limit):
             if limit:
                 remaining = limit - len(results)
-                cursor = self.conn.execute("""
+                cursor = self.conn.execute(f"""
                     SELECT DISTINCT p.id, p.name, p.version, p.release, p.arch,
                            p.nevra, p.summary, p.size, pr.capability as matched_provide
                     FROM packages p
                     JOIN provides pr ON pr.pkg_id = p.id
-                    WHERE LOWER(pr.capability) LIKE ?
+                    {version_join.replace('p.media_id', 'p.media_id') if version_join else ''}
+                    WHERE LOWER(pr.capability) LIKE ? {version_filter}
                     ORDER BY p.name_lower
                     LIMIT ?
-                """, (pattern_lower, remaining + len(seen_ids)))
+                """, base_params + (remaining + len(seen_ids),))
             else:
-                cursor = self.conn.execute("""
+                cursor = self.conn.execute(f"""
                     SELECT DISTINCT p.id, p.name, p.version, p.release, p.arch,
                            p.nevra, p.summary, p.size, pr.capability as matched_provide
                     FROM packages p
                     JOIN provides pr ON pr.pkg_id = p.id
-                    WHERE LOWER(pr.capability) LIKE ?
+                    {version_join.replace('p.media_id', 'p.media_id') if version_join else ''}
+                    WHERE LOWER(pr.capability) LIKE ? {version_filter}
                     ORDER BY p.name_lower
-                """, (pattern_lower,))
+                """, base_params)
 
             for row in cursor:
                 pkg = dict(row)
@@ -1659,13 +1679,31 @@ class PackageDatabase:
         return results
     
     def get_package(self, name: str) -> Optional[Dict]:
-        """Get a package by exact name (latest version)."""
-        cursor = self.conn.execute("""
-            SELECT * FROM packages
-            WHERE name_lower = ?
-            ORDER BY epoch DESC, version DESC, release DESC
-            LIMIT 1
-        """, (name.lower(),))
+        """Get a package by exact name (latest version).
+
+        Filters by system version to avoid returning packages from other
+        Mageia versions (e.g., mga9 packages on a mga10 system).
+        """
+        from .config import get_system_version
+        system_version = get_system_version()
+
+        if system_version:
+            # Filter by system version via media join
+            cursor = self.conn.execute("""
+                SELECT p.* FROM packages p
+                JOIN media m ON p.media_id = m.id
+                WHERE p.name_lower = ? AND m.mageia_version = ?
+                ORDER BY p.epoch DESC, p.version DESC, p.release DESC
+                LIMIT 1
+            """, (name.lower(), system_version))
+        else:
+            # Fallback if system version unknown
+            cursor = self.conn.execute("""
+                SELECT * FROM packages
+                WHERE name_lower = ?
+                ORDER BY epoch DESC, version DESC, release DESC
+                LIMIT 1
+            """, (name.lower(),))
 
         row = cursor.fetchone()
         if not row:
@@ -1676,6 +1714,8 @@ class PackageDatabase:
         pkg['provides'] = self._get_deps(pkg['id'], 'provides')
         pkg['conflicts'] = self._get_deps(pkg['id'], 'conflicts')
         pkg['obsoletes'] = self._get_deps(pkg['id'], 'obsoletes')
+        pkg['recommends'] = self._get_deps(pkg['id'], 'recommends')
+        pkg['suggests'] = self._get_deps(pkg['id'], 'suggests')
 
         return pkg
 
@@ -1696,6 +1736,8 @@ class PackageDatabase:
         pkg['provides'] = self._get_deps(pkg['id'], 'provides')
         pkg['conflicts'] = self._get_deps(pkg['id'], 'conflicts')
         pkg['obsoletes'] = self._get_deps(pkg['id'], 'obsoletes')
+        pkg['recommends'] = self._get_deps(pkg['id'], 'recommends')
+        pkg['suggests'] = self._get_deps(pkg['id'], 'suggests')
 
         return pkg
 
@@ -1750,6 +1792,8 @@ class PackageDatabase:
         pkg['provides'] = self._get_deps(pkg['id'], 'provides')
         pkg['conflicts'] = self._get_deps(pkg['id'], 'conflicts')
         pkg['obsoletes'] = self._get_deps(pkg['id'], 'obsoletes')
+        pkg['recommends'] = self._get_deps(pkg['id'], 'recommends')
+        pkg['suggests'] = self._get_deps(pkg['id'], 'suggests')
 
         return pkg
 
@@ -2067,16 +2111,31 @@ class PackageDatabase:
     def get_all_versions(self, name: str) -> List[Dict]:
         """Get all versions of a package from all media.
 
+        Filters by system version to avoid returning packages from other
+        Mageia versions (e.g., mga9 packages on a mga10 system).
+
         Returns packages sorted by effective priority (pins + media priority),
         then by version (newest first).
         """
-        cursor = self.conn.execute("""
-            SELECT p.*, m.name as media_name, m.priority as media_priority
-            FROM packages p
-            LEFT JOIN media m ON p.media_id = m.id
-            WHERE p.name_lower = ?
-            ORDER BY p.epoch DESC, p.version DESC, p.release DESC
-        """, (name.lower(),))
+        from .config import get_system_version
+        system_version = get_system_version()
+
+        if system_version:
+            cursor = self.conn.execute("""
+                SELECT p.*, m.name as media_name, m.priority as media_priority
+                FROM packages p
+                JOIN media m ON p.media_id = m.id
+                WHERE p.name_lower = ? AND m.mageia_version = ?
+                ORDER BY p.epoch DESC, p.version DESC, p.release DESC
+            """, (name.lower(), system_version))
+        else:
+            cursor = self.conn.execute("""
+                SELECT p.*, m.name as media_name, m.priority as media_priority
+                FROM packages p
+                LEFT JOIN media m ON p.media_id = m.id
+                WHERE p.name_lower = ?
+                ORDER BY p.epoch DESC, p.version DESC, p.release DESC
+            """, (name.lower(),))
 
         packages = [dict(row) for row in cursor]
 
@@ -2118,6 +2177,8 @@ class PackageDatabase:
         best['provides'] = self._get_deps(best['id'], 'provides')
         best['conflicts'] = self._get_deps(best['id'], 'conflicts')
         best['obsoletes'] = self._get_deps(best['id'], 'obsoletes')
+        best['recommends'] = self._get_deps(best['id'], 'recommends')
+        best['suggests'] = self._get_deps(best['id'], 'suggests')
 
         return best
 

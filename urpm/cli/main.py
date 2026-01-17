@@ -2161,11 +2161,35 @@ def cmd_show(args, db: PackageDatabase) -> int:
         from . import display
         display.print_package_list(pkg['requires'], max_lines=10, color_func=colors.dim)
 
+    if pkg.get('recommends'):
+        rec_count = len(pkg['recommends'])
+        print(f"\n{colors.bold(f'Recommends ({rec_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['recommends'], max_lines=10, color_func=colors.dim)
+
+    if pkg.get('suggests'):
+        sug_count = len(pkg['suggests'])
+        print(f"\n{colors.bold(f'Suggests ({sug_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['suggests'], max_lines=10, color_func=colors.dim)
+
     if pkg.get('provides'):
         prov_count = len(pkg['provides'])
         print(f"\n{colors.bold(f'Provides ({prov_count}):')} ")
         from . import display
         display.print_package_list(pkg['provides'], max_lines=5, color_func=colors.dim)
+
+    if pkg.get('conflicts'):
+        conf_count = len(pkg['conflicts'])
+        print(f"\n{colors.bold(f'Conflicts ({conf_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['conflicts'], max_lines=5, color_func=colors.dim)
+
+    if pkg.get('obsoletes'):
+        obs_count = len(pkg['obsoletes'])
+        print(f"\n{colors.bold(f'Obsoletes ({obs_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['obsoletes'], max_lines=5, color_func=colors.dim)
 
     print()
     return 0
