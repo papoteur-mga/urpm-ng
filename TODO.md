@@ -62,13 +62,13 @@ Aujourd'hui c'est confus : update fait les deux selon les arguments.
 - [x] `urpm install --builddeps <pkg.src.rpm>`
 - [x] `urpm install -b` (auto-détection dans arborescence de travail RPM)
 
-### Parsing hdlist.cz
+### Parsing hdlist.cz et/ou changelog.xml.lzma files.xml.lzma info.xml.lzma
 - [ ] Vérifier si le DL des hdlists.cz est encore nécessaire. Parce que quand on fait un urpmf c'est un fichier media_info/files.xml.lzma qui est récupéré et analysé.
-- [ ] Liste des fichiers contenus <-- ça c'est dans le media_info/files.xml.lzma
+- [ ] Liste des fichiers contenus <-- ça c'est sûrement dans le media_info/files.xml.lzma
 - [ ] Description longue, changelog, scripts <-- ça c'est peut être dans les hdlist.cz
 
 ### Recherche fichiers (urpmf)
-- [ ] Chercher dans paquets disponibles (pas seulement installés)
+- [ ] Chercher dans les paquets disponibles (pas seulement installés)
 - [ ] Support patterns/regex
 
 ---
@@ -107,7 +107,7 @@ urpm bootstrap </chemin/vers/repertoire> ferait tout ça d'un coup
 - [x] `urpm mkimage --release <version> --tag <tag>` : création d'images Docker/Podman minimales
 - [x] `urpm build --image <tag> <source>` : build de RPM en containers isolés
 - [x] Support workspace layout (SPECS/SOURCES → RPMS/SRPMS)
-- [x] Builds parallèles (`--parallel N`)
+- [ ] Builds parallèles (`--parallel N`) <-- a vérifier
 - [x] Auto-détection Docker/Podman (`--runtime`)
 - [x] P2P via `--network host` pour le cache urpmd
 
@@ -120,7 +120,7 @@ urpm bootstrap </chemin/vers/repertoire> ferait tout ça d'un coup
 
 ### Split ?
 
-- [ ] Prévoir de séparer en plusieurs rpms : urpm, urpmd, urpmb (b pour build), urpms (s pour scedule)
+- [ ] Prévoir de séparer en plusieurs rpms : urpm, urpmd, urpmb (b pour build), urpms (s pour schedule)
 
 ---
 
