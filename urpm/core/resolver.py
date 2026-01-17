@@ -18,7 +18,7 @@ except ImportError:
     HAS_RPM = False
 
 from .database import PackageDatabase
-from .config import get_media_local_path, get_base_dir
+from .config import get_media_local_path, get_base_dir, get_system_version
 from .compression import decompress_stream
 
 
@@ -377,12 +377,23 @@ class Resolver:
         # Use urpm_root for config paths if specified
         base_dir = get_base_dir(urpm_root=self.urpm_root)
         debug.log(f"Base dir for synthesis: {base_dir}")
+
+        # Get system version for media filtering (partition by distro version)
+        system_version = get_system_version(self.root)
+        debug.log(f"System version: {system_version}")
+
         media_list = self.db.list_media()
         debug.log(f"Found {len(media_list)} media in database")
 
         for media in media_list:
             if not media['enabled']:
                 debug.log(f"Skipping disabled media: {media['name']}")
+                continue
+
+            # Filter by Mageia version - only load media matching system version
+            media_version = media.get('mageia_version')
+            if system_version and media_version and media_version != system_version:
+                debug.log(f"Skipping media {media['name']}: version {media_version} != system {system_version}")
                 continue
 
             repo = pool.add_repo(media['name'])

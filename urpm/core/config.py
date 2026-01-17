@@ -387,3 +387,43 @@ def get_socket_family_for_ip_mode(ip_mode: str) -> int:
     else:
         # 'auto', 'dual', 'ipv4' - prefer IPv4 (faster, more reliable)
         return socket.AF_INET
+
+
+# Cache for system version
+_system_version_cache: Optional[str] = None
+
+
+def get_system_version(root: str = None) -> Optional[str]:
+    """Get the Mageia version of the system.
+
+    Reads VERSION_ID from /etc/os-release (or <root>/etc/os-release).
+
+    Args:
+        root: Optional chroot path (for --root or --urpm-root)
+
+    Returns:
+        Version string (e.g., '9', '10', 'cauldron') or None if not detected.
+    """
+    global _system_version_cache
+
+    # Use cache only for non-chroot case
+    if root is None and _system_version_cache is not None:
+        return _system_version_cache
+
+    os_release = Path(root or '/') / 'etc' / 'os-release'
+
+    version = None
+    try:
+        with open(os_release) as f:
+            for line in f:
+                if line.startswith('VERSION_ID='):
+                    version = line.strip().split('=')[1].strip('"')
+                    break
+    except (IOError, OSError):
+        pass
+
+    # Cache for non-chroot case
+    if root is None:
+        _system_version_cache = version
+
+    return version
