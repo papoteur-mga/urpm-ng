@@ -90,10 +90,8 @@ class SolverDebug:
         if not self.enabled:
             return
         self.log(f"Jobs: {len(jobs)}")
-        for job in jobs[:10]:
+        for job in jobs:
             self.log(f"{job}", indent=1)
-        if len(jobs) > 10:
-            self.log(f"... and {len(jobs) - 10} more jobs", indent=1)
 
     def log_problems(self, problems):
         """Log solver problems."""
@@ -2108,6 +2106,8 @@ class Resolver:
 
             already_warned = set(held_upgrade_warnings)  # Avoid duplicate warnings
             seen_obsoletes = set()  # Track what we've already processed
+            # Build set of installed package names for fast lookup
+            installed_names = {pkg.name for pkg in self.pool.installed.solvables}
 
             for repo in self.pool.repos:
                 if repo == self.pool.installed:
@@ -2124,6 +2124,19 @@ class Resolver:
                         for provider in self.pool.whatprovides(obs_id):
                             if provider.repo != self.pool.installed:
                                 continue  # Only care about installed packages
+
+                            # Skip self-obsoletes (same package name)
+                            # This happens when a package has Obsoletes: pkgname < version
+                            # to clean up upgrades - it's not a replacement, just an upgrade
+                            if s.name == provider.name:
+                                continue
+
+                            # Skip if obsoleting package is already installed
+                            # This prevents "downgrade" scenarios where mageia-release-common
+                            # obsoletes mageia-release-Default but is already installed
+                            if s.name in installed_names:
+                                debug.log(f"SKIP: {s.name} obsoletes {provider.name} but is already installed")
+                                continue
 
                             # Skip if already warned in upgrade loop
                             if provider.name in already_warned:
