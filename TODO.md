@@ -6,6 +6,32 @@
 
 ---
 
+## Récemment implémenté (v0.1.22)
+
+### Package holds
+- [x] `urpm hold <package>` - verrouiller un paquet
+- [x] `urpm unhold <package>` - déverrouiller
+- [x] `urpm hold` (sans args) - lister les paquets verrouillés
+- [x] Option `-r/--reason` pour documenter la raison du hold
+- [x] Protection contre les upgrades ET les obsoletes
+
+### Obsoletes detection dans upgrade
+- [x] `urpm upgrade` détecte les paquets disponibles qui obsolètent des paquets installés
+- [x] Propose automatiquement le remplacement (ex: dhcpcd remplaçant dhcp-client)
+- [x] Respecte les holds - les paquets verrouillés ne sont pas remplacés
+- [x] Affichage des warnings pour les paquets held qui seraient obsolétés
+
+### urpm info amélioré
+- [x] Affichage des Recommends, Suggests, Conflicts, Obsoletes
+- [x] Information complète sur les dépendances
+
+### Filtrage par version système
+- [x] Les requêtes DB filtrent par version Mageia du système
+- [x] Évite de retourner des paquets mga9 sur un système mga10
+- [x] Affecte `urpm info`, `urpm search`, et toutes les requêtes
+
+---
+
 ## En cours
 
 ### Clarification update/upgrade (style apt)
@@ -62,13 +88,13 @@ Aujourd'hui c'est confus : update fait les deux selon les arguments.
 - [x] `urpm install --builddeps <pkg.src.rpm>`
 - [x] `urpm install -b` (auto-détection dans arborescence de travail RPM)
 
-### Parsing hdlist.cz
+### Parsing hdlist.cz et/ou changelog.xml.lzma files.xml.lzma info.xml.lzma
 - [ ] Vérifier si le DL des hdlists.cz est encore nécessaire. Parce que quand on fait un urpmf c'est un fichier media_info/files.xml.lzma qui est récupéré et analysé.
-- [ ] Liste des fichiers contenus <-- ça c'est dans le media_info/files.xml.lzma
+- [ ] Liste des fichiers contenus <-- ça c'est sûrement dans le media_info/files.xml.lzma
 - [ ] Description longue, changelog, scripts <-- ça c'est peut être dans les hdlist.cz
 
 ### Recherche fichiers (urpmf)
-- [ ] Chercher dans paquets disponibles (pas seulement installés)
+- [ ] Chercher dans les paquets disponibles (pas seulement installés)
 - [ ] Support patterns/regex
 
 ---
@@ -107,7 +133,7 @@ urpm bootstrap </chemin/vers/repertoire> ferait tout ça d'un coup
 - [x] `urpm mkimage --release <version> --tag <tag>` : création d'images Docker/Podman minimales
 - [x] `urpm build --image <tag> <source>` : build de RPM en containers isolés
 - [x] Support workspace layout (SPECS/SOURCES → RPMS/SRPMS)
-- [x] Builds parallèles (`--parallel N`)
+- [ ] Builds parallèles (`--parallel N`) <-- a vérifier
 - [x] Auto-détection Docker/Podman (`--runtime`)
 - [x] P2P via `--network host` pour le cache urpmd
 
@@ -120,7 +146,7 @@ urpm bootstrap </chemin/vers/repertoire> ferait tout ça d'un coup
 
 ### Split ?
 
-- [ ] Prévoir de séparer en plusieurs rpms : urpm, urpmd, urpmb (b pour build), urpms (s pour scedule)
+- [ ] Prévoir de séparer en plusieurs rpms : urpm, urpmd, urpmb (b pour build), urpms (s pour schedule)
 
 ---
 
@@ -229,7 +255,7 @@ juste parce que la branche pipewire est cassée. pipewire-libs peut
 ## Phase différée (entreprise)
 
 - [ ] Infrastructure advisories (MGASA)
-- [ ] versionlock
+- [x] versionlock → implémenté via `urpm hold/unhold` (v0.1.22)
 - [ ] downgrade
 - [ ] APIs sécurisées (/api/upgrade, /api/install)
 - [ ] Gestion de parc (inventaire, déploiement)

@@ -1,5 +1,5 @@
 %define name urpm-ng
-%define version 0.1.18
+%define version 0.1.23
 %define release 1
 
 Name:           %{name}
@@ -26,6 +26,8 @@ Requires:       python3-solv
 Requires:       python3-rpm
 Requires:       python3-zstandard
 Requires:       gnupg2
+
+Suggests:       fakeroot
 
 Requires(post):   systemd
 Requires(preun):  systemd

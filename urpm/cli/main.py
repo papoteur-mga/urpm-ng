@@ -1061,6 +1061,37 @@ Examples:
     )
 
     # =========================================================================
+    # hold / unhold
+    # =========================================================================
+    hold_parser = subparsers.add_parser(
+        'hold',
+        help='Hold packages (prevent upgrades and obsoletes replacement)',
+        parents=[display_parent]
+    )
+    hold_parser.add_argument(
+        'packages', nargs='*', metavar='PACKAGE',
+        help='Package names to hold (or list holds if empty)'
+    )
+    hold_parser.add_argument(
+        '-r', '--reason',
+        help='Reason for holding the package'
+    )
+    hold_parser.add_argument(
+        '-l', '--list', action='store_true', dest='list_holds',
+        help='List held packages'
+    )
+
+    unhold_parser = subparsers.add_parser(
+        'unhold',
+        help='Remove hold from packages',
+        parents=[display_parent]
+    )
+    unhold_parser.add_argument(
+        'packages', nargs='+', metavar='PACKAGE',
+        help='Package names to unhold'
+    )
+
+    # =========================================================================
     # media / m
     # =========================================================================
     media_parser = subparsers.add_parser(
@@ -2161,11 +2192,35 @@ def cmd_show(args, db: PackageDatabase) -> int:
         from . import display
         display.print_package_list(pkg['requires'], max_lines=10, color_func=colors.dim)
 
+    if pkg.get('recommends'):
+        rec_count = len(pkg['recommends'])
+        print(f"\n{colors.bold(f'Recommends ({rec_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['recommends'], max_lines=10, color_func=colors.dim)
+
+    if pkg.get('suggests'):
+        sug_count = len(pkg['suggests'])
+        print(f"\n{colors.bold(f'Suggests ({sug_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['suggests'], max_lines=10, color_func=colors.dim)
+
     if pkg.get('provides'):
         prov_count = len(pkg['provides'])
         print(f"\n{colors.bold(f'Provides ({prov_count}):')} ")
         from . import display
         display.print_package_list(pkg['provides'], max_lines=5, color_func=colors.dim)
+
+    if pkg.get('conflicts'):
+        conf_count = len(pkg['conflicts'])
+        print(f"\n{colors.bold(f'Conflicts ({conf_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['conflicts'], max_lines=5, color_func=colors.dim)
+
+    if pkg.get('obsoletes'):
+        obs_count = len(pkg['obsoletes'])
+        print(f"\n{colors.bold(f'Obsoletes ({obs_count}):')} ")
+        from . import display
+        display.print_package_list(pkg['obsoletes'], max_lines=5, color_func=colors.dim)
 
     print()
     return 0
@@ -2657,6 +2712,10 @@ def cmd_init(args, db: PackageDatabase) -> int:
         (root_path / 'tmp').chmod(0o1777)
         (root_path / 'var/tmp').chmod(0o1777)
 
+        # Skip mount operations if no_mount flag is set (used by mkimage)
+        # Container runtimes handle /dev and /proc mounting internally
+        no_mount = getattr(args, 'no_mount', False)
+
         # Check if filesystem supports device nodes (nodev mount option)
         def is_nodev_filesystem(path: Path) -> bool:
             """Check if path is on a filesystem mounted with nodev."""
@@ -2701,7 +2760,9 @@ def cmd_init(args, db: PackageDatabase) -> int:
                 pass
             return False
 
-        if not is_dev_mounted(chroot_dev):
+        if no_mount:
+            print("  Skipping mount operations (container mode)")
+        elif not is_dev_mounted(chroot_dev):
             if is_nodev_filesystem(root_path):
                 print("  Filesystem has nodev - bind mounting /dev from host...")
             else:
@@ -2741,58 +2802,59 @@ def cmd_init(args, db: PackageDatabase) -> int:
             print("  /dev already mounted")
             dev_mounted = True
 
-        # Create /dev/fd symlink (only if not using bind mount)
-        fd_link = root_path / 'dev/fd'
-        if not dev_mounted and not fd_link.exists():
-            try:
-                fd_link.symlink_to('/proc/self/fd')
-            except OSError:
-                pass
+        # Create /dev/fd symlink (only if not using bind mount and not container mode)
+        if not no_mount:
+            fd_link = root_path / 'dev/fd'
+            if not dev_mounted and not fd_link.exists():
+                try:
+                    fd_link.symlink_to('/proc/self/fd')
+                except OSError:
+                    pass
 
-        # Create /dev/stdin, stdout, stderr symlinks (only if not using bind mount)
-        if not dev_mounted:
-            for i, name in enumerate(['stdin', 'stdout', 'stderr']):
-                link_path = root_path / 'dev' / name
-                if not link_path.exists():
-                    try:
-                        link_path.symlink_to(f'/proc/self/fd/{i}')
-                    except OSError:
-                        pass
+            # Create /dev/stdin, stdout, stderr symlinks (only if not using bind mount)
+            if not dev_mounted:
+                for i, name in enumerate(['stdin', 'stdout', 'stderr']):
+                    link_path = root_path / 'dev' / name
+                    if not link_path.exists():
+                        try:
+                            link_path.symlink_to(f'/proc/self/fd/{i}')
+                        except OSError:
+                            pass
 
-        # Mount /proc (needed by many scriptlets)
-        chroot_proc = root_path / 'proc'
-        def is_proc_mounted(chroot_proc: Path) -> bool:
-            try:
-                with open('/proc/mounts', 'r') as f:
-                    chroot_proc_str = str(chroot_proc.resolve())
-                    for line in f:
-                        parts = line.split()
-                        if len(parts) >= 2 and parts[1] == chroot_proc_str:
-                            return True
-            except (OSError, IOError):
-                pass
-            return False
+            # Mount /proc (needed by many scriptlets)
+            chroot_proc = root_path / 'proc'
+            def is_proc_mounted(chroot_proc: Path) -> bool:
+                try:
+                    with open('/proc/mounts', 'r') as f:
+                        chroot_proc_str = str(chroot_proc.resolve())
+                        for line in f:
+                            parts = line.split()
+                            if len(parts) >= 2 and parts[1] == chroot_proc_str:
+                                return True
+                except (OSError, IOError):
+                    pass
+                return False
 
-        if not is_proc_mounted(chroot_proc):
-            print("  Mounting /proc...")
-            result = subprocess.run(
-                ['mount', '-t', 'proc', 'proc', str(chroot_proc)],
-                capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                print(colors.dim(f"  (unmount with: umount {chroot_proc})"))
+            if not is_proc_mounted(chroot_proc):
+                print("  Mounting /proc...")
+                result = subprocess.run(
+                    ['mount', '-t', 'proc', 'proc', str(chroot_proc)],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    print(colors.dim(f"  (unmount with: umount {chroot_proc})"))
+                else:
+                    print(colors.warning(f"  Failed to mount /proc: {result.stderr.strip()}"))
             else:
-                print(colors.warning(f"  Failed to mount /proc: {result.stderr.strip()}"))
-        else:
-            print("  /proc already mounted")
+                print("  /proc already mounted")
 
-        # Create /etc/mtab symlink to /proc/mounts
-        mtab_link = root_path / 'etc/mtab'
-        if not mtab_link.exists():
-            try:
-                mtab_link.symlink_to('/proc/mounts')
-            except OSError:
-                pass
+            # Create /etc/mtab symlink to /proc/mounts
+            mtab_link = root_path / 'etc/mtab'
+            if not mtab_link.exists():
+                try:
+                    mtab_link.symlink_to('/proc/mounts')
+                except OSError:
+                    pass
 
         # Copy /etc/resolv.conf for DNS resolution
         resolv_src = Path('/etc/resolv.conf')
@@ -3329,7 +3391,14 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
     """Handle media update command."""
     from . import colors
     from ..core.sync import sync_media, sync_all_media
+    from ..core.install import check_root
     import threading
+
+    # Check root privileges (media update writes to database)
+    if not check_root():
+        print(colors.error("Error: root privileges required for media update"))
+        print("Try: sudo urpm media update")
+        return 1
 
     def progress(media_name, stage, current, total):
         # Clear line with ANSI escape code, then print
@@ -6105,6 +6174,14 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print(colors.error("Error: --nodeps requires --download-only"))
         return 1
 
+    # Check root privileges early (unless allowed to skip for mkimage)
+    from ..core.install import check_root
+    allow_no_root = getattr(args, 'allow_no_root', False)
+    if not download_only and not allow_no_root and not check_root():
+        print(colors.error("Error: root privileges required for installation"))
+        print("Try: sudo urpm install <packages>")
+        return 1
+
     # Handle --builddeps option (install build dependencies from spec/SRPM)
     builddeps = getattr(args, 'builddeps', None)
     if builddeps:
@@ -6866,14 +6943,6 @@ def cmd_install(args, db: PackageDatabase) -> int:
         print("No packages to install")
         return 0
 
-    # Install packages
-    from ..core.install import check_root
-
-    if not check_root():
-        print(colors.error("\nError: root privileges required for installation"))
-        print("Try: sudo urpm install", ' '.join(args.packages))
-        return 1
-
     # Begin transaction for history
     cmd_line = "urpm install " + " ".join(args.packages)
     transaction_id = db.begin_transaction('install', cmd_line)
@@ -6911,7 +6980,9 @@ def cmd_install(args, db: PackageDatabase) -> int:
     print(colors.info(f"\nInstalling {len(rpm_paths)} packages..."))
 
     # Check if another install is in progress
-    lock = InstallLock()
+    # Use root path for lock file when installing to chroot
+    install_root = getattr(args, 'root', None) or getattr(args, 'urpm_root', None)
+    lock = InstallLock(root=install_root)
     if not lock.acquire(blocking=False):
         print(colors.warning("  RPM database is locked by another process."))
         print(colors.dim("  Waiting for lock... (Ctrl+C to cancel)"))
@@ -6934,7 +7005,9 @@ def cmd_install(args, db: PackageDatabase) -> int:
         # Get root for chroot installation
         from ..core.config import get_rpm_root
         rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
-        queue = TransactionQueue(root=rpm_root or "/")
+        # Use fakeroot for non-root chroot installs (e.g., mkimage)
+        use_fakeroot = getattr(args, 'allow_no_root', False) and rpm_root
+        queue = TransactionQueue(root=rpm_root or "/", use_fakeroot=use_fakeroot)
         queue.add_install(
             rpm_paths,
             operation_id="install",
@@ -7378,6 +7451,7 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
             mirrorlist=None,
             auto=True,
             no_sync=False,
+            no_mount=True,  # Skip mount operations - container runtime handles /dev, /proc
         )
         ret = cmd_init(init_args, chroot_db)
         if ret != 0:
@@ -7404,6 +7478,7 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
             all=False,
             test=False,
             sync=True,  # Wait for all scriptlets to complete
+            allow_no_root=True,  # Installing to user-owned chroot
         )
         ret = cmd_install(install_args, chroot_db)
         if ret != 0:
@@ -7432,6 +7507,7 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
             all=False,
             test=False,
             sync=True,  # Wait for all scriptlets to complete
+            allow_no_root=True,  # Installing to user-owned chroot
         )
         ret = cmd_install(urpm_install_args, chroot_db)
 
@@ -7490,6 +7566,7 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
                 all=False,
                 test=False,
                 sync=True,  # Wait for all scriptlets to complete
+                allow_no_root=True,  # Installing to user-owned chroot
             )
             ret = cmd_install(urpm_local_args, chroot_db)
             if ret != 0:
@@ -8287,6 +8364,23 @@ def cmd_update(args, db: PackageDatabase) -> int:
             print(f"  {colors.error(prob)}")
         return 1
 
+    # Show warnings for held packages
+    held_count = 0
+    if hasattr(resolver, '_held_upgrade_warnings') and resolver._held_upgrade_warnings:
+        held_count += len(resolver._held_upgrade_warnings)
+    if hasattr(resolver, '_held_obsolete_warnings') and resolver._held_obsolete_warnings:
+        held_count += len(resolver._held_obsolete_warnings)
+
+    if held_count > 0:
+        print(colors.warning(f"\nHeld packages ({held_count}) skipped:"))
+        if hasattr(resolver, '_held_upgrade_warnings') and resolver._held_upgrade_warnings:
+            for held_pkg in resolver._held_upgrade_warnings:
+                print(f"  {colors.warning(held_pkg)} (upgrade skipped)")
+        if hasattr(resolver, '_held_obsolete_warnings') and resolver._held_obsolete_warnings:
+            for held_pkg, obsoleting_pkg in resolver._held_obsolete_warnings:
+                print(f"  {colors.warning(held_pkg)} (would be obsoleted by {obsoleting_pkg})")
+        print(f"\n  Use '{colors.dim('urpm unhold <package>')}' to allow changes.")
+
     if not result.actions:
         print(colors.success("All packages are up to date."))
         return 0
@@ -8590,7 +8684,14 @@ def cmd_update(args, db: PackageDatabase) -> int:
         for op_result in queue_result.operations:
             if op_result.operation_id == "upgrade":
                 if op_result.success:
-                    print(colors.success(f"  {op_result.count} packages upgraded"))
+                    # Show both upgraded and removed counts
+                    msg_parts = []
+                    if op_result.count > 0:
+                        msg_parts.append(f"{op_result.count} packages upgraded")
+                    if remove_names:
+                        msg_parts.append(f"{len(remove_names)} removed (obsoleted)")
+                    if msg_parts:
+                        print(colors.success(f"  {', '.join(msg_parts)}"))
                 else:
                     upgrade_success = False
                     print(colors.error(f"\nUpgrade failed:"))
@@ -9513,6 +9614,69 @@ def cmd_mark(args, db: PackageDatabase) -> int:
     else:
         print("Usage: urpm mark <manual|auto|show> [packages...]")
         return 1
+
+
+def cmd_hold(args, db: PackageDatabase) -> int:
+    """Handle hold command - hold packages to prevent upgrades and obsoletes."""
+    from . import colors
+    from datetime import datetime
+
+    # List holds if no packages or --list
+    if args.list_holds or not args.packages:
+        holds = db.list_holds()
+        if not holds:
+            print("No packages are held.")
+            return 0
+
+        print(f"Held packages ({len(holds)}):\n")
+        for hold in holds:
+            ts = datetime.fromtimestamp(hold['added_timestamp'])
+            reason = f" - {hold['reason']}" if hold['reason'] else ""
+            print(f"  {colors.warning(hold['package_name'])}{reason}")
+            print(f"    (held since {ts.strftime('%Y-%m-%d %H:%M')})")
+        return 0
+
+    # Hold packages
+    added = []
+    already_held = []
+
+    for pkg in args.packages:
+        if db.add_hold(pkg, args.reason):
+            added.append(pkg)
+        else:
+            already_held.append(pkg)
+
+    if already_held:
+        print(f"Already held: {', '.join(already_held)}")
+
+    if added:
+        print(colors.success(f"Held: {', '.join(added)}"))
+        print("These packages will be protected from upgrades and obsoletes replacement.")
+
+    return 0 if added or already_held else 1
+
+
+def cmd_unhold(args, db: PackageDatabase) -> int:
+    """Handle unhold command - remove hold from packages."""
+    from . import colors
+
+    removed = []
+    not_held = []
+
+    for pkg in args.packages:
+        if db.remove_hold(pkg):
+            removed.append(pkg)
+        else:
+            not_held.append(pkg)
+
+    if not_held:
+        print(f"Not held: {', '.join(not_held)}")
+
+    if removed:
+        print(colors.success(f"Unheld: {', '.join(removed)}"))
+        print("These packages can now be upgraded and replaced by obsoletes.")
+
+    return 0 if removed else 1
 
 
 def cmd_history(args, db: PackageDatabase) -> int:
@@ -13110,6 +13274,12 @@ def main(argv=None) -> int:
 
         elif args.command == 'mark':
             return cmd_mark(args, db)
+
+        elif args.command == 'hold':
+            return cmd_hold(args, db)
+
+        elif args.command == 'unhold':
+            return cmd_unhold(args, db)
 
         elif args.command in ('provides', 'p'):
             return cmd_provides(args, db)
