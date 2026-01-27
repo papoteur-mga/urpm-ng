@@ -1229,6 +1229,12 @@ def sync_all_files_xml(
                 conn.commit()
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+                # Signal indexing phase (can take ~30s for 7M files)
+                if progress_callback:
+                    for state in downloaded_states:
+                        if state.import_complete:
+                            progress_callback(state.media_name, 'indexing', 0, 0, 0, 0)
+
                 db.finalize_package_files_atomic()
 
                 # Update files_xml_state for all successfully imported media

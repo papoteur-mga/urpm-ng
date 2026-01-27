@@ -3488,7 +3488,17 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
             return 1
     else:
         # Update all media in parallel
+        import time
         print("Updating all media (parallel)...")
+
+        # Helper to format elapsed time
+        def format_elapsed(seconds):
+            mins = int(seconds // 60)
+            secs = int(seconds % 60)
+            if mins > 0:
+                return f"{mins}m{secs}s"
+            else:
+                return f"{secs}s"
 
         # Track status for each media
         media_status = {}
@@ -3515,7 +3525,9 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
 
                 num_lines = len(media_list)
 
+        sync_start = time.time()
         results = sync_all_media(db, parallel_progress, force=True)
+        sync_elapsed = time.time() - sync_start
 
         # Clear progress lines
         if num_lines > 0:
@@ -3539,66 +3551,81 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
                 errors += 1
 
         if errors:
-            print(f"\n{colors.info('Total')}: {colors.success(str(total_packages))} packages from {len(results)} media ({colors.error(str(errors))} errors)")
+            print(f"\n{colors.info('Total')}: {colors.success(str(total_packages))} packages from {len(results)} media in {format_elapsed(sync_elapsed)} ({colors.error(str(errors))} errors)")
         else:
-            print(f"\n{colors.info('Total')}: {colors.success(str(total_packages))} packages from {len(results)} media")
+            print(f"\n{colors.info('Total')}: {colors.success(str(total_packages))} packages from {len(results)} media in {format_elapsed(sync_elapsed)}")
 
         # Sync files.xml if requested
         if sync_files:
-            import sys
-
-            current_media = [None]  # Use list to allow modification in nested function
-
-            def files_progress(media_name, stage, dl_current, dl_total, import_current, import_total):
-                """Simple single-line progress display."""
-                # New media? Print newline to start fresh
-                if current_media[0] != media_name:
-                    if current_media[0] is not None:
-                        print()  # Finish previous line
-                    current_media[0] = media_name
-
-                # Build status message
-                if stage == 'checking':
-                    msg = f"  {media_name}: checking..."
-                elif stage == 'skipped':
-                    msg = f"  {media_name}: up-to-date"
-                elif stage == 'downloading':
-                    if dl_total > 0:
-                        pct = int(100 * dl_current / dl_total)
-                        msg = f"  {media_name}: downloading {pct}%"
-                    else:
-                        msg = f"  {media_name}: downloading..."
-                elif stage == 'downloaded':
-                    msg = f"  {media_name}: downloaded"
-                elif stage in ('syncing', 'analyzing', 'diff'):
-                    msg = f"  {media_name}: analyzing changes..."
-                elif stage == 'removing':
-                    msg = f"  {media_name}: removing old packages..."
-                elif stage == 'adding':
-                    if import_total > 0:
-                        msg = f"  {media_name}: adding {import_current}/{import_total} packages"
-                    else:
-                        msg = f"  {media_name}: adding packages..."
-                elif stage == 'importing':
-                    if import_total > 0:
-                        pct = min(99, int(100 * import_current / import_total))
-                        msg = f"  {media_name}: importing {pct}%"
-                    else:
-                        msg = f"  {media_name}: importing..."
-                elif stage == 'done':
-                    msg = f"  {media_name}: {colors.success('done')}"
-                elif stage == 'error':
-                    msg = f"  {media_name}: {colors.error('error')}"
-                else:
-                    msg = f"  {media_name}: {stage}"
-
-                # Overwrite current line
-                sys.stdout.write(f"\r{msg:<60}")
-                sys.stdout.flush()
-
             print(f"\nSyncing files.xml...")
 
+            # Track status for each media (same pattern as synthesis sync)
+            # Filter by version/arch like sync_all_files_xml does
+            from ..core.sync import get_mageia_version_arch
+            version, arch = get_mageia_version_arch()
+
+            files_status = {}
+            files_lock = threading.Lock()
+            files_media_list = []
+            for m in db.list_media():
+                if not m['enabled'] or not m.get('sync_files'):
+                    continue
+                # Same filter as sync_all_files_xml
+                media_version = m.get('mageia_version', '')
+                media_arch = m.get('architecture', '')
+                version_ok = not media_version or not version or media_version == version
+                arch_ok = not media_arch or not arch or media_arch == arch
+                if version_ok and arch_ok:
+                    files_media_list.append(m['name'])
+            files_num_lines = 0
+
+            def files_progress(media_name, stage, dl_current, dl_total, import_current, import_total):
+                nonlocal files_num_lines
+                with files_lock:
+                    # Build status string
+                    if stage == 'checking':
+                        status = "checking..."
+                    elif stage == 'skipped':
+                        status = "up-to-date"
+                    elif stage == 'downloading':
+                        if dl_total > 0:
+                            pct = int(100 * dl_current / dl_total)
+                            status = f"downloading {pct}%"
+                        else:
+                            status = "downloading..."
+                    elif stage == 'downloaded':
+                        status = "downloaded"
+                    elif stage in ('syncing', 'analyzing', 'diff'):
+                        status = "analyzing..."
+                    elif stage == 'importing':
+                        if import_total > 0:
+                            pct = min(99, int(100 * import_current / import_total))
+                            status = f"importing {pct}%"
+                        else:
+                            status = "importing..."
+                    elif stage == 'indexing':
+                        status = "creating indexes..."
+                    elif stage == 'done':
+                        status = colors.success("done")
+                    elif stage == 'error':
+                        status = colors.error("error")
+                    else:
+                        status = stage
+
+                    files_status[media_name] = status
+
+                    # Redraw all status lines
+                    if files_num_lines > 0:
+                        print(f"\033[{files_num_lines}F", end='', flush=True)
+
+                    for name in files_media_list:
+                        st = files_status.get(name, "waiting...")
+                        print(f"\033[K  {name}: {st}")
+
+                    files_num_lines = len(files_media_list)
+
             # Run parallel sync (force=False to respect MD5 checks)
+            files_start = time.time()
             files_results = sync_all_files_xml(
                 db,
                 progress_callback=files_progress,
@@ -3606,22 +3633,35 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
                 max_workers=4,
                 filter_version=True
             )
+            files_elapsed = time.time() - files_start
 
-            # Finish last line
-            if current_media[0] is not None:
-                print()
+            # Clear progress lines
+            if files_num_lines > 0:
+                print(f"\033[{files_num_lines}F", end='', flush=True)
+                for _ in range(files_num_lines):
+                    print("\033[K", end='')
+                    print("\033[1B", end='')
+                print(f"\033[{files_num_lines}F", end='', flush=True)
+
+            # Print final results
+            for name, result in files_results:
+                if result.success:
+                    if result.skipped:
+                        print(f"  {name}: up-to-date")
+                    else:
+                        count_str = colors.success(f"{result.file_count:,}") if result.file_count > 0 else "0"
+                        print(f"  {name}: {count_str} files")
+                else:
+                    print(f"  {colors.error(name)}: ERROR - {result.error}")
 
             # Final summary
             total_files = sum(r.file_count for _, r in files_results if r.success)
             files_errors = sum(1 for _, r in files_results if not r.success)
-            skipped = sum(1 for _, r in files_results if r.skipped)
 
             if files_errors > 0:
-                print(f"{colors.info('Total files')}: {colors.success(f'{total_files:,}')} ({skipped} unchanged, {colors.error(str(files_errors))} errors)")
-            elif skipped > 0:
-                print(f"{colors.info('Total files')}: {colors.success(f'{total_files:,}')} ({skipped} media unchanged)")
+                print(f"\n{colors.info('Total files')}: {colors.success(f'{total_files:,}')} in {format_elapsed(files_elapsed)} ({colors.error(str(files_errors))} errors)")
             else:
-                print(f"{colors.info('Total files')}: {colors.success(f'{total_files:,}')}")
+                print(f"\n{colors.info('Total files')}: {colors.success(f'{total_files:,}')} in {format_elapsed(files_elapsed)}")
 
         return 1 if errors else 0
 
