@@ -377,6 +377,11 @@ Examples:
         help='Skip GPG signature verification (not recommended)'
     )
     install_parser.add_argument(
+        '--noscripts',
+        action='store_true',
+        help='Skip pre/post install scripts (for chroot/container builds)'
+    )
+    install_parser.add_argument(
         '--no-peers',
         action='store_true',
         help='Disable P2P download from LAN peers'
@@ -521,7 +526,7 @@ Examples:
     )
     mkimage_parser.add_argument(
         '--workdir', '-w',
-        help='Working directory for chroot (default: /tmp)'
+        help='Working directory for chroot (default: ~/.cache/urpm/mkimage)'
     )
 
     # =========================================================================
@@ -2753,10 +2758,25 @@ def cmd_init(args, db: PackageDatabase) -> int:
             'dev', 'dev/pts', 'dev/shm',
             'proc', 'sys',
             'etc', 'var/tmp', 'var/lib/rpm',
-            'run', 'tmp'
+            'run', 'tmp',
+            # UsrMerge target directories
+            'usr/bin', 'usr/sbin', 'usr/lib', 'usr/lib64'
         ]
         for d in essential_dirs:
             (root_path / d).mkdir(parents=True, exist_ok=True)
+
+        # Create UsrMerge symlinks (required for --noscripts mode where
+        # filesystem package scriptlets don't run)
+        usrmerge_links = [
+            ('bin', 'usr/bin'),
+            ('sbin', 'usr/sbin'),
+            ('lib', 'usr/lib'),
+            ('lib64', 'usr/lib64'),
+        ]
+        for link_name, target in usrmerge_links:
+            link_path = root_path / link_name
+            if not link_path.exists():
+                link_path.symlink_to(target)
 
         # Set proper permissions for /tmp and /var/tmp
         (root_path / 'tmp').chmod(0o1777)
@@ -2913,6 +2933,38 @@ def cmd_init(args, db: PackageDatabase) -> int:
             try:
                 import shutil
                 shutil.copy2(str(resolv_src), str(resolv_dst))
+            except (OSError, IOError):
+                pass
+
+        # Create minimal /etc/passwd and /etc/group for RPM
+        # These are needed before the first package installation
+        passwd_file = root_path / 'etc/passwd'
+        if not passwd_file.exists():
+            try:
+                passwd_file.write_text("root:x:0:0:root:/root:/bin/bash\n")
+            except (OSError, IOError):
+                pass
+
+        group_file = root_path / 'etc/group'
+        if not group_file.exists():
+            try:
+                # Minimal groups needed by common packages
+                group_file.write_text(
+                    "root:x:0:\n"
+                    "bin:x:1:\n"
+                    "daemon:x:2:\n"
+                    "sys:x:3:\n"
+                    "tty:x:5:\n"
+                    "disk:x:6:\n"
+                    "wheel:x:10:\n"
+                    "mail:x:12:\n"
+                    "man:x:15:\n"
+                    "utmp:x:22:\n"
+                    "audio:x:63:\n"
+                    "video:x:39:\n"
+                    "users:x:100:\n"
+                    "nobody:x:65534:\n"
+                )
             except (OSError, IOError):
                 pass
 
@@ -7222,16 +7274,18 @@ def cmd_install(args, db: PackageDatabase) -> int:
         # Get root for chroot installation
         from ..core.config import get_rpm_root
         rpm_root = get_rpm_root(getattr(args, 'root', None), getattr(args, 'urpm_root', None))
-        # Use fakeroot for non-root chroot installs (e.g., mkimage)
-        use_fakeroot = getattr(args, 'allow_no_root', False) and rpm_root
-        queue = TransactionQueue(root=rpm_root or "/", use_fakeroot=use_fakeroot)
+        # Use user namespace for non-root chroot installs (e.g., mkimage)
+        use_userns = getattr(args, 'allow_no_root', False) and rpm_root
+        queue = TransactionQueue(root=rpm_root or "/", use_userns=use_userns)
+        noscripts = getattr(args, 'noscripts', False)
         queue.add_install(
             rpm_paths,
             operation_id="install",
             verify_signatures=verify_sigs,
             force=force,
             test=test_mode,
-            reinstall=reinstall_mode
+            reinstall=reinstall_mode,
+            noscripts=noscripts
         )
 
         # Progress callback
@@ -7590,6 +7644,7 @@ def cmd_download(args, db: PackageDatabase) -> int:
 def cmd_mkimage(args, db: PackageDatabase) -> int:
     """Create a minimal Docker/Podman image for RPM builds."""
     import argparse
+    import os
     import platform
     import shutil
     import tempfile
@@ -7625,6 +7680,9 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
     # Base packages for build image
     packages = [
         'basesystem-minimal',
+        'coreutils',          # Essential: ls, cp, mv, cat, etc.
+        'grep',               # Essential: used by bash profile scripts
+        'sed',                # Essential: used by bash profile scripts
         'vim-minimal',
         'locales',
         'locales-en',
@@ -7646,8 +7704,28 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
     print(f"  Architecture: {arch}")
     print(f"  Packages: {len(packages)}")
 
-    # Create temporary directory for chroot
+    # Determine working directory (default: ~/.cache/urpm/mkimage)
     workdir = getattr(args, 'workdir', None)
+    if not workdir:
+        # Use XDG cache directory as default (better than /tmp for large builds)
+        xdg_cache = os.environ.get('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
+        workdir = os.path.join(xdg_cache, 'urpm', 'mkimage')
+        os.makedirs(workdir, exist_ok=True)
+
+    # Check available disk space (require at least 2 GB)
+    MIN_SPACE_GB = 2
+    try:
+        stat = os.statvfs(workdir)
+        free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+        if free_gb < MIN_SPACE_GB:
+            print(colors.error(f"Insufficient disk space in {workdir}"))
+            print(colors.error(f"  Available: {free_gb:.1f} GB, required: {MIN_SPACE_GB} GB"))
+            print(colors.dim(f"  Use --workdir to specify a different location"))
+            return 1
+    except OSError as e:
+        print(colors.warning(f"Could not check disk space: {e}"))
+
+    # Create temporary directory for chroot
     tmpdir = tempfile.mkdtemp(prefix='urpm-mkimage-', dir=workdir)
     print(f"\nBuilding chroot in {tmpdir}...")
 
@@ -7676,7 +7754,12 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
             return ret
 
         # 2. Install packages
-        print("\n[2/5] Installing packages...")
+        # Use noscripts when not root (user namespace) - scriptlets often fail
+        use_noscripts = os.geteuid() != 0
+        if use_noscripts:
+            print("\n[2/5] Installing packages (--noscripts for user namespace)...")
+        else:
+            print("\n[2/5] Installing packages...")
         install_args = argparse.Namespace(
             urpm_root=tmpdir,
             root=tmpdir,
@@ -7687,6 +7770,7 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
             download_only=False,
             nodeps=False,
             nosignature=False,
+            noscripts=use_noscripts,
             force=False,
             reinstall=False,
             debug=None,
@@ -7716,6 +7800,7 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
             download_only=False,
             nodeps=False,
             nosignature=False,
+            noscripts=use_noscripts,
             force=False,
             reinstall=False,
             debug=None,
@@ -7775,6 +7860,7 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
                 download_only=False,
                 nodeps=False,
                 nosignature=True,  # Local build, no signature
+                noscripts=use_noscripts,
                 force=False,
                 reinstall=False,
                 debug=None,
@@ -7806,9 +7892,25 @@ def cmd_mkimage(args, db: PackageDatabase) -> int:
 
         # 5. Create container image
         print(f"\n[5/5] Creating container image {tag}...")
+        # Estimate chroot size for user feedback
+        try:
+            import os
+            total_size = sum(
+                os.path.getsize(os.path.join(dirpath, filename))
+                for dirpath, dirnames, filenames in os.walk(tmpdir)
+                for filename in filenames
+                if os.path.isfile(os.path.join(dirpath, filename))
+            )
+            size_mb = total_size / (1024 * 1024)
+            print(f"  Chroot size: {size_mb:.1f} MB")
+        except Exception:
+            pass
+        print(f"  Archiving and importing (this may take a moment)...", end='', flush=True)
         if not container.import_from_dir(tmpdir, tag):
+            print()  # newline after "..."
             print(colors.error("Failed to create container image"))
             return 1
+        print(" done")
 
         # Get image size
         images = container.images(filter_name=tag)
@@ -7873,6 +7975,18 @@ def _cleanup_chroot_for_image(root: str):
                 pass
 
     print(f"  Removed {removed} cache/log entries")
+
+    # Create /etc/machine-id if missing (required by systemd, dbus, etc.)
+    machine_id_path = os.path.join(root, 'etc', 'machine-id')
+    if not os.path.exists(machine_id_path):
+        try:
+            import uuid
+            machine_id = uuid.uuid4().hex  # 32 hex chars, no dashes
+            with open(machine_id_path, 'w') as f:
+                f.write(machine_id + '\n')
+            print(f"  Created /etc/machine-id")
+        except (IOError, OSError):
+            pass
 
 
 def cmd_build(args, db: PackageDatabase) -> int:

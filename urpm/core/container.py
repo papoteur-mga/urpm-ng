@@ -365,20 +365,27 @@ class Container:
         logger.info(f"Creating image {tag} from {directory}")
 
         # tar -C dir -c . | docker/podman import - tag
+        # Let tar stderr go to terminal so user sees warnings
         tar_proc = subprocess.Popen(
             ['tar', '-C', directory, '-c', '.'],
             stdout=subprocess.PIPE
         )
-        import_proc = subprocess.run(
+        import_proc = subprocess.Popen(
             [self.cmd, 'import', '-', tag],
             stdin=tar_proc.stdout,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True
         )
+
+        # Allow tar_proc to receive SIGPIPE if import_proc exits early
+        tar_proc.stdout.close()
+
+        import_stdout, import_stderr = import_proc.communicate()
         tar_proc.wait()
 
         if import_proc.returncode != 0:
-            logger.error(f"Import failed: {import_proc.stderr}")
+            logger.error(f"Import failed: {import_stderr}")
             return False
 
         return True
