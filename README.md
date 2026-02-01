@@ -774,4 +774,5 @@ GPL-3.0 - See LICENSE file for details.
 # Authors
 
 - Maât (Pascal Vilarem)
+- Papoteur (Mageia Contributor)
 - Claude (AI assistant)
