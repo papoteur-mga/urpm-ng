@@ -11763,11 +11763,15 @@ def cmd_whatprovides(args, db: PackageDatabase) -> int:
 def cmd_find(args, db: PackageDatabase) -> int:
     """Handle find command - find packages containing a file (like urpmf)."""
     from . import colors
+    from collections import OrderedDict
 
     pattern = args.pattern
     search_available = getattr(args, 'available', False)
     search_installed = getattr(args, 'installed', False)
-    limit = getattr(args, 'limit', 100)
+    show_all = getattr(args, 'show_all', False)
+
+    # Limit files per package (--show-all shows all)
+    FILES_PER_PKG = 5 if not show_all else 0  # 0 = unlimited
 
     # Default: search both if neither flag is specified
     if not search_available and not search_installed:
@@ -11798,23 +11802,36 @@ def cmd_find(args, db: PackageDatabase) -> int:
             else:
                 # Pattern search - need to iterate all packages
                 import fnmatch
+                # Convert SQL wildcards to fnmatch wildcards
+                fnmatch_pattern = pattern.replace('%', '*').replace('_', '?')
+                has_wildcards = '*' in fnmatch_pattern or '?' in fnmatch_pattern
+
+                if fnmatch_pattern.startswith('/'):
+                    # Absolute path - use as-is
+                    pass
+                elif has_wildcards:
+                    # User specified wildcards - use as-is
+                    pass
+                else:
+                    # No wildcards, no leading / - search for exact filename
+                    # nvim → */nvim (file named nvim)
+                    fnmatch_pattern = '*/' + fnmatch_pattern
+
                 for hdr in ts.dbMatch():
                     name = hdr[rpm.RPMTAG_NAME]
                     if name == 'gpg-pubkey':
                         continue
                     files = hdr[rpm.RPMTAG_FILENAMES] or []
+                    version = hdr[rpm.RPMTAG_VERSION]
+                    release = hdr[rpm.RPMTAG_RELEASE]
+                    arch = hdr[rpm.RPMTAG_ARCH] or 'noarch'
+                    nevra = f"{name}-{version}-{release}.{arch}"
                     for f in files:
-                        if fnmatch.fnmatch(f, f'*{pattern}*') or pattern in f:
-                            version = hdr[rpm.RPMTAG_VERSION]
-                            release = hdr[rpm.RPMTAG_RELEASE]
-                            arch = hdr[rpm.RPMTAG_ARCH] or 'noarch'
+                        if fnmatch.fnmatch(f, fnmatch_pattern):
                             installed_found.append({
-                                'nevra': f"{name}-{version}-{release}.{arch}",
+                                'nevra': nevra,
                                 'file': f
                             })
-                            break  # Only show package once
-                    if limit > 0 and len(installed_found) >= limit:
-                        break
         except ImportError:
             pass
 
@@ -11865,23 +11882,26 @@ def cmd_find(args, db: PackageDatabase) -> int:
                 return 1
             # else: silently skip available search if searching both
         else:
-            # Search in database
+            # Check if FTS index needs rebuild (migration case)
+            if db.is_fts_available() and not db.is_fts_index_current():
+                print(colors.warning("L'index de recherche rapide (FTS) doit être reconstruit."))
+                print(colors.dim("Lancez: sudo urpm media update --files"))
+                print(colors.dim("(La recherche sera plus lente en attendant)"))
+                print()
+
+            # Search in database (uses FTS if available, falls back to B-tree)
             results = db.search_files(
                 pattern,
-                limit=limit if limit > 0 else 0
+                limit=0  # Fetch all, display limits handled by FILES_PER_PKG
             )
 
-            # Group by nevra to show file only once per package
-            seen_nevras = set()
+            # Collect all matching files
             for r in results:
-                nevra = r['pkg_nevra']
-                if nevra not in seen_nevras:
-                    seen_nevras.add(nevra)
-                    available_found.append({
-                        'nevra': nevra,
-                        'file': r['file_path'],
-                        'media': r['media_name']
-                    })
+                available_found.append({
+                    'nevra': r['pkg_nevra'],
+                    'file': r['file_path'],
+                    'media': r['media_name']
+                })
 
     # Display results
     if not installed_found and not available_found:
@@ -11892,27 +11912,70 @@ def cmd_find(args, db: PackageDatabase) -> int:
                 print(colors.info("Hint: run 'sudo urpm media update --files' to enable searching available packages"))
         return 1
 
-    # Build combined display
-    total_shown = 0
-
     # Helper to highlight pattern in file path (green)
     def highlight_pattern(filepath: str, pat: str) -> str:
         """Highlight pattern matches in filepath with green color."""
         import re
-        # Case-insensitive search
         try:
-            # Escape special regex chars in pattern, then do case-insensitive replace
-            escaped = re.escape(pat)
-            return re.sub(f'({escaped})', lambda m: colors.success(m.group(1)), filepath, flags=re.IGNORECASE)
+            # Strip leading/trailing wildcards (they match everything, no point highlighting)
+            regex_pat = pat.strip('%*')
+            if not regex_pat:
+                return filepath  # Pattern is only wildcards, nothing to highlight
+
+            # Escape regex special chars
+            regex_pat = re.sub(r'([.^$+{}\\|\[\]()])', r'\\\1', regex_pat)
+            # Convert remaining internal wildcards to regex
+            regex_pat = regex_pat.replace('%', '.*').replace('*', '.*')
+            regex_pat = regex_pat.replace('?', '.').replace('_', '.')
+            return re.sub(f'({regex_pat})', lambda m: colors.success(m.group(1)), filepath, flags=re.IGNORECASE)
         except re.error:
             return filepath
 
+    # Helper to group results by package
+    def group_by_package(results: list) -> OrderedDict:
+        """Group results by nevra, preserving order of first occurrence."""
+        grouped = OrderedDict()
+        for r in results:
+            nevra = r['nevra']
+            if nevra not in grouped:
+                grouped[nevra] = {'media': r.get('media'), 'files': []}
+            grouped[nevra]['files'].append(r['file'])
+        return grouped
+
+    # Helper to display a group of packages
+    def display_grouped(grouped: OrderedDict, max_files: int, show_media: bool = False) -> tuple:
+        """Display grouped packages, return (shown_files, hidden_files)."""
+        total_shown = 0
+        total_hidden = 0
+        for nevra, data in grouped.items():
+            files = data['files']
+            media_str = f" {colors.dim('[' + data['media'] + ']')}" if show_media and data.get('media') else ""
+            pkg_display = colors.cyan(nevra)
+            print(f"  {pkg_display}:{media_str}")
+
+            # Show files with optional limit
+            files_to_show = files if max_files == 0 else files[:max_files]
+            for f in files_to_show:
+                print(f"    {highlight_pattern(f, pattern)}")
+                total_shown += 1
+
+            # Show "... N more" if truncated
+            hidden = len(files) - len(files_to_show)
+            if hidden > 0:
+                print(colors.dim(f"    ... ({hidden} more)"))
+                total_hidden += hidden
+
+        return total_shown, total_hidden
+
+    total_shown = 0
+    total_hidden = 0
+
     if installed_found:
         print(colors.info("Installed:"))
-        for match in installed_found[:limit if limit > 0 else len(installed_found)]:
-            highlighted_file = highlight_pattern(match['file'], pattern)
-            print(f"  {match['nevra']}: {highlighted_file}")
-            total_shown += 1
+        grouped = group_by_package(installed_found)
+        shown, hidden = display_grouped(grouped, FILES_PER_PKG, show_media=False)
+        total_shown += shown
+        total_hidden += hidden
 
     if available_found:
         # Filter out already-installed packages (by NEVRA)
@@ -11923,17 +11986,14 @@ def cmd_find(args, db: PackageDatabase) -> int:
             if installed_found:
                 print()
             print(colors.info("Available (not installed):"))
-            remaining_limit = (limit - total_shown) if limit > 0 else len(available_not_installed)
-            for match in available_not_installed[:remaining_limit]:
-                media_str = f" [{match['media']}]" if match.get('media') else ""
-                highlighted_file = highlight_pattern(match['file'], pattern)
-                print(f"  {match['nevra']}: {highlighted_file}{media_str}")
-                total_shown += 1
+            grouped = group_by_package(available_not_installed)
+            shown, hidden = display_grouped(grouped, FILES_PER_PKG, show_media=True)
+            total_shown += shown
+            total_hidden += hidden
 
-    # Summary
-    total_found = len(installed_found) + len(available_found)
-    if limit > 0 and total_found > limit:
-        print(f"\n{colors.info('Showing')} {total_shown} of {total_found} results (use --limit to see more)")
+    # Summary if some files were hidden
+    if total_hidden > 0:
+        print(f"\n{colors.dim(f'{total_hidden} files hidden (use --show-all to see all)')}")
 
     return 0
 
