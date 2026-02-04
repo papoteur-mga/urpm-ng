@@ -1770,6 +1770,45 @@ class PackageDatabase:
     # Package queries
     # =========================================================================
 
+    def _get_accepted_versions(self) -> Optional[set]:
+        """Get the set of accepted media versions for queries.
+
+        Uses get_accepted_versions() which respects the version-mode config.
+        Returns None if no version filtering should be applied.
+        """
+        from .config import get_accepted_versions, get_system_version
+
+        accepted, needs_choice, info = get_accepted_versions(self)
+
+        if accepted:
+            return accepted
+
+        if needs_choice:
+            # Ambiguous (mix of cauldron + numeric) - accept all
+            return None
+
+        # Fallback to system version
+        sv = get_system_version()
+        return {sv} if sv else None
+
+    def _build_version_filter(self, table_alias: str = "m") -> tuple:
+        """Build SQL version filter clause and params.
+
+        Returns:
+            (join_clause, where_clause, params) where:
+            - join_clause: JOIN media ... (or empty string)
+            - where_clause: AND m.mageia_version IN (...) (or empty string)
+            - params: tuple of version values
+        """
+        accepted = self._get_accepted_versions()
+        if not accepted:
+            return "", "", ()
+
+        join_clause = f"JOIN media {table_alias} ON p.media_id = {table_alias}.id"
+        placeholders = ','.join('?' * len(accepted))
+        where_clause = f"AND {table_alias}.mageia_version IN ({placeholders})"
+        return join_clause, where_clause, tuple(accepted)
+
     def search(self, pattern: str, limit: int = None, search_provides: bool = False) -> List[Dict]:
         """Search packages by name pattern, optionally also in provides.
 
@@ -1784,22 +1823,13 @@ class PackageDatabase:
         Returns:
             List of package dicts. If found via provides, includes 'matched_provide' key.
         """
-        from .config import get_system_version
-        system_version = get_system_version()
-
         pattern_lower = f'%{pattern.lower()}%'
         results = []
         seen_ids = set()
 
-        # Build version filter
-        if system_version:
-            version_join = "JOIN media m ON p.media_id = m.id"
-            version_filter = "AND m.mageia_version = ?"
-            base_params = (pattern_lower, system_version)
-        else:
-            version_join = ""
-            version_filter = ""
-            base_params = (pattern_lower,)
+        # Build version filter (respects version-mode config)
+        version_join, version_filter, version_params = self._build_version_filter()
+        base_params = (pattern_lower,) + version_params
 
         # Search by name
         if limit:
@@ -1866,20 +1896,18 @@ class PackageDatabase:
         Filters by system version to avoid returning packages from other
         Mageia versions (e.g., mga9 packages on a mga10 system).
         """
-        from .config import get_system_version
-        system_version = get_system_version()
+        # Build version filter (respects version-mode config)
+        version_join, version_filter, version_params = self._build_version_filter()
 
-        if system_version:
-            # Filter by system version via media join
-            cursor = self.conn.execute("""
+        if version_join:
+            cursor = self.conn.execute(f"""
                 SELECT p.* FROM packages p
-                JOIN media m ON p.media_id = m.id
-                WHERE p.name_lower = ? AND m.mageia_version = ?
+                {version_join}
+                WHERE p.name_lower = ? {version_filter}
                 ORDER BY p.epoch DESC, p.version DESC, p.release DESC
                 LIMIT 1
-            """, (name.lower(), system_version))
+            """, (name.lower(),) + version_params)
         else:
-            # Fallback if system version unknown
             cursor = self.conn.execute("""
                 SELECT * FROM packages
                 WHERE name_lower = ?
@@ -2361,17 +2389,18 @@ class PackageDatabase:
         Returns packages sorted by effective priority (pins + media priority),
         then by version (newest first).
         """
-        from .config import get_system_version
-        system_version = get_system_version()
+        # Build version filter (respects version-mode config)
+        accepted = self._get_accepted_versions()
 
-        if system_version:
-            cursor = self.conn.execute("""
+        if accepted:
+            placeholders = ','.join('?' * len(accepted))
+            cursor = self.conn.execute(f"""
                 SELECT p.*, m.name as media_name, m.priority as media_priority
                 FROM packages p
                 JOIN media m ON p.media_id = m.id
-                WHERE p.name_lower = ? AND m.mageia_version = ?
+                WHERE p.name_lower = ? AND m.mageia_version IN ({placeholders})
                 ORDER BY p.epoch DESC, p.version DESC, p.release DESC
-            """, (name.lower(), system_version))
+            """, (name.lower(),) + tuple(accepted))
         else:
             cursor = self.conn.execute("""
                 SELECT p.*, m.name as media_name, m.priority as media_priority
