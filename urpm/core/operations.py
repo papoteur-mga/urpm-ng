@@ -6,6 +6,11 @@ Used by both the CLI (directly) and the D-Bus service (via PackageKit).
 
 The CLI handles all user interaction (prompts, display, progress).
 This module handles the business logic (resolution, download, install).
+
+Auth integration:
+- Mutating methods accept an optional auth_context parameter.
+- When provided (D-Bus), permissions are checked and operations are audited.
+- When absent (CLI as root), no checks are performed.
 """
 
 import logging
@@ -19,6 +24,16 @@ from .download import Downloader, DownloadItem
 from .transaction_queue import TransactionQueue
 
 logger = logging.getLogger(__name__)
+
+# Optional auth imports - available when urpm.auth is installed
+try:
+    from ..auth.context import AuthContext, Permission, AuthError
+    from ..auth.audit import AuditLogger
+    _HAS_AUTH = True
+except ImportError:
+    _HAS_AUTH = False
+    AuthContext = None
+    AuditLogger = None
 
 
 @dataclass
@@ -44,18 +59,60 @@ class PackageOperations:
     methods and handle user interaction themselves.
     """
 
-    def __init__(self, db: PackageDatabase, base_dir: Path = None):
+    def __init__(self, db: PackageDatabase, base_dir: Path = None,
+                 audit_logger: 'AuditLogger' = None):
         """Initialize operations.
 
         Args:
             db: Package database instance
             base_dir: Base directory for cache (default: from config)
+            audit_logger: Optional audit logger for privileged operation logging
         """
         self.db = db
         if base_dir is None:
             from .config import get_base_dir
             base_dir = get_base_dir()
         self.base_dir = base_dir
+        self.audit = audit_logger
+
+    # =========================================================================
+    # Auth helpers
+    # =========================================================================
+
+    def _check_auth(self, auth_context, permission, action: str):
+        """Check authorization if an auth context is provided.
+
+        Args:
+            auth_context: AuthContext or None (CLI as root skips checks)
+            permission: Required Permission flag
+            action: Action name for error messages and audit
+
+        Raises:
+            AuthError: If permission is denied
+        """
+        if auth_context is None or not _HAS_AUTH:
+            return
+        if not (auth_context.permissions & permission):
+            if self.audit:
+                self.audit.log_auth_denied(auth_context, action)
+            from ..auth.context import AuthError
+            raise AuthError(action, auth_context)
+
+    def _audit_start(self, auth_context, action: str, packages: list,
+                     command: str = ""):
+        """Log operation start if audit logger is available."""
+        if self.audit and auth_context:
+            self.audit.log_operation_start(
+                auth_context, action, packages, command
+            )
+
+    def _audit_complete(self, auth_context, action: str, packages: list,
+                        success: bool, error: str = ""):
+        """Log operation completion if audit logger is available."""
+        if self.audit and auth_context:
+            self.audit.log_operation_complete(
+                auth_context, action, packages, success, error
+            )
 
     # =========================================================================
     # Download
@@ -213,7 +270,8 @@ class PackageOperations:
         self,
         rpm_paths: List[str],
         options: InstallOptions = None,
-        progress_callback: Callable[[str, str, int, int], None] = None
+        progress_callback: Callable[[str, str, int, int], None] = None,
+        auth_context=None
     ) -> Any:
         """Execute RPM installation via TransactionQueue.
 
@@ -221,12 +279,19 @@ class PackageOperations:
             rpm_paths: List of RPM file paths to install
             options: Install options
             progress_callback: Called with (op_id, name, current, total)
+            auth_context: Optional AuthContext for permission check + audit
 
         Returns:
             TransactionQueue result
         """
+        if _HAS_AUTH:
+            self._check_auth(auth_context, Permission.INSTALL, "install")
+
         if options is None:
             options = InstallOptions()
+
+        pkg_names = [Path(p).stem for p in rpm_paths]
+        self._audit_start(auth_context, "install", pkg_names)
 
         queue = TransactionQueue(
             root=options.root,
@@ -242,16 +307,19 @@ class PackageOperations:
             noscripts=options.noscripts
         )
 
-        return queue.execute(
+        result = queue.execute(
             progress_callback=progress_callback,
             sync=options.sync
         )
+        self._audit_complete(auth_context, "install", pkg_names, success=True)
+        return result
 
     def execute_erase(
         self,
         package_names: List[str],
         options: InstallOptions = None,
-        progress_callback: Callable[[str, str, int, int], None] = None
+        progress_callback: Callable[[str, str, int, int], None] = None,
+        auth_context=None
     ) -> Any:
         """Execute RPM removal via TransactionQueue.
 
@@ -259,12 +327,18 @@ class PackageOperations:
             package_names: Package names to remove
             options: Install options
             progress_callback: Called with (op_id, name, current, total)
+            auth_context: Optional AuthContext for permission check + audit
 
         Returns:
             TransactionQueue result
         """
+        if _HAS_AUTH:
+            self._check_auth(auth_context, Permission.REMOVE, "remove")
+
         if options is None:
             options = InstallOptions()
+
+        self._audit_start(auth_context, "remove", package_names)
 
         queue = TransactionQueue(
             root=options.root,
@@ -277,10 +351,12 @@ class PackageOperations:
             test=options.test,
         )
 
-        return queue.execute(
+        result = queue.execute(
             progress_callback=progress_callback,
             sync=options.sync
         )
+        self._audit_complete(auth_context, "remove", package_names, success=True)
+        return result
 
     def execute_upgrade(
         self,
@@ -288,7 +364,8 @@ class PackageOperations:
         erase_names: List[str] = None,
         orphan_names: List[str] = None,
         options: InstallOptions = None,
-        progress_callback: Callable[[str, str, int, int], None] = None
+        progress_callback: Callable[[str, str, int, int], None] = None,
+        auth_context=None
     ) -> Any:
         """Execute upgrade via TransactionQueue.
 
@@ -301,12 +378,19 @@ class PackageOperations:
             orphan_names: Orphaned deps to remove in background
             options: Install options
             progress_callback: Called with (op_id, name, current, total)
+            auth_context: Optional AuthContext for permission check + audit
 
         Returns:
             TransactionQueue result, or None if nothing to do
         """
+        if _HAS_AUTH:
+            self._check_auth(auth_context, Permission.UPGRADE, "upgrade")
+
         if options is None:
             options = InstallOptions()
+
+        pkg_names = [Path(p).stem for p in rpm_paths]
+        self._audit_start(auth_context, "upgrade", pkg_names)
 
         queue = TransactionQueue(
             root=options.root,
@@ -335,10 +419,12 @@ class PackageOperations:
         if queue.is_empty():
             return None
 
-        return queue.execute(
+        result = queue.execute(
             progress_callback=progress_callback,
             sync=options.sync
         )
+        self._audit_complete(auth_context, "upgrade", pkg_names, success=True)
+        return result
 
     # =========================================================================
     # Transaction History
