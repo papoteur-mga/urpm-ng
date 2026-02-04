@@ -11,6 +11,10 @@ Group:          System/Configuration/Packaging
 URL:            https://github.com/pvi-github/urpm-ng
 Source0:        %{name}-%{version}.tar.gz
 Source1:        urpmd.service
+Source2:        urpm-dbus.service
+Source3:        org.mageia.Urpm.v1.service
+Source4:        org.mageia.Urpm.v1.conf
+Source5:        org.mageia.urpm.policy
 
 BuildArch:      noarch
 BuildRequires:  pyproject-rpm-macros
@@ -25,7 +29,9 @@ Requires:       python3
 Requires:       python3-solv
 Requires:       python3-rpm
 Requires:       python3-zstandard
+Requires:       python3-gobject
 Requires:       gnupg2
+Requires:       polkit
 
 Requires(post):   systemd
 Requires(preun):  systemd
@@ -63,8 +69,24 @@ fi
 %pyproject_install
 %pyproject_save_files urpm
 
-# Install systemd service
+# Install systemd services
 install -Dm644 %{SOURCE1} %{buildroot}%{_unitdir}/urpmd.service
+install -Dm644 %{SOURCE2} %{buildroot}%{_unitdir}/urpm-dbus.service
+
+# Install D-Bus service and policy
+install -Dm644 %{SOURCE3} %{buildroot}%{_datadir}/dbus-1/system-services/org.mageia.Urpm.v1.service
+install -Dm644 %{SOURCE4} %{buildroot}%{_sysconfdir}/dbus-1/system.d/org.mageia.Urpm.v1.conf
+
+# Install PolicyKit policy
+install -Dm644 %{SOURCE5} %{buildroot}%{_datadir}/polkit-1/actions/org.mageia.urpm.policy
+
+# Install D-Bus service executable
+install -Dm755 /dev/null %{buildroot}%{_libexecdir}/urpm-dbus-service
+cat > %{buildroot}%{_libexecdir}/urpm-dbus-service << 'EOFSCRIPT'
+#!/usr/bin/python3
+from urpm.dbus.service import main
+main()
+EOFSCRIPT
 
 # Install documentation
 install -dm755 %{buildroot}%{_docdir}/%{name}
@@ -136,6 +158,7 @@ if [ $1 -eq 0 ]; then
     # Uninstall
     /usr/bin/systemctl stop urpmd.service >/dev/null 2>&1 || :
     /usr/bin/systemctl disable urpmd.service >/dev/null 2>&1 || :
+    /usr/bin/systemctl stop urpm-dbus.service >/dev/null 2>&1 || :
 fi
 
 %postun
@@ -155,7 +178,13 @@ fi
 %doc %{_docdir}/%{name}
 %{_bindir}/urpm
 %{_bindir}/urpmd
+%{_bindir}/urpm-dbus-service
+%{_libexecdir}/urpm-dbus-service
 %{_unitdir}/urpmd.service
+%{_unitdir}/urpm-dbus.service
+%{_datadir}/dbus-1/system-services/org.mageia.Urpm.v1.service
+%config(noreplace) %{_sysconfdir}/dbus-1/system.d/org.mageia.Urpm.v1.conf
+%{_datadir}/polkit-1/actions/org.mageia.urpm.policy
 %{_sysconfdir}/bash_completion.d/urpm
 %{_mandir}/man1/urpm.1*
 %{_mandir}/man8/urpmd.8*
