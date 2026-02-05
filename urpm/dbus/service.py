@@ -255,8 +255,8 @@ class UrpmDBusService:
                     download_items, progress_callback=dl_progress
                 )
                 for r in dl_results:
-                    if r.get('path'):
-                        rpm_paths.append(r['path'])
+                    if r.path:
+                        rpm_paths.append(str(r.path))
 
             if not rpm_paths:
                 self._emit_complete(op_id, False, "No packages downloaded")
@@ -411,8 +411,8 @@ class UrpmDBusService:
                     download_items, progress_callback=dl_progress
                 )
                 for r in dl_results:
-                    if r.get('path'):
-                        rpm_paths.append(r['path'])
+                    if r.path:
+                        rpm_paths.append(str(r.path))
 
             if not rpm_paths and not remove_names:
                 msg = "Nothing to upgrade"

@@ -10,11 +10,6 @@ License:        GPLv3+
 Group:          System/Configuration/Packaging
 URL:            https://github.com/pvi-github/urpm-ng
 Source0:        %{name}-%{version}.tar.gz
-Source1:        urpmd.service
-Source2:        urpm-dbus.service
-Source3:        org.mageia.Urpm.v1.service
-Source4:        org.mageia.Urpm.v1.conf
-Source5:        org.mageia.urpm.policy
 
 BuildArch:      noarch
 BuildRequires:  pyproject-rpm-macros
@@ -70,15 +65,15 @@ fi
 %pyproject_save_files urpm
 
 # Install systemd services
-install -Dm644 %{SOURCE1} %{buildroot}%{_unitdir}/urpmd.service
-install -Dm644 %{SOURCE2} %{buildroot}%{_unitdir}/urpm-dbus.service
+install -Dm644 data/urpmd.service %{buildroot}%{_unitdir}/urpmd.service
+install -Dm644 data/urpm-dbus.service %{buildroot}%{_unitdir}/urpm-dbus.service
 
 # Install D-Bus service and policy
-install -Dm644 %{SOURCE3} %{buildroot}%{_datadir}/dbus-1/system-services/org.mageia.Urpm.v1.service
-install -Dm644 %{SOURCE4} %{buildroot}%{_sysconfdir}/dbus-1/system.d/org.mageia.Urpm.v1.conf
+install -Dm644 data/org.mageia.Urpm.v1.service %{buildroot}%{_datadir}/dbus-1/system-services/org.mageia.Urpm.v1.service
+install -Dm644 data/org.mageia.Urpm.v1.conf %{buildroot}%{_sysconfdir}/dbus-1/system.d/org.mageia.Urpm.v1.conf
 
 # Install PolicyKit policy
-install -Dm644 %{SOURCE5} %{buildroot}%{_datadir}/polkit-1/actions/org.mageia.urpm.policy
+install -Dm644 data/org.mageia.urpm.policy %{buildroot}%{_datadir}/polkit-1/actions/org.mageia.urpm.policy
 
 # Install D-Bus service executable
 install -Dm755 /dev/null %{buildroot}%{_libexecdir}/urpm-dbus-service

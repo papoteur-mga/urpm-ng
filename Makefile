@@ -16,7 +16,7 @@ tarball: version
 	$(SED) -i 's/^%define version.*/%define version $(VERSION)/' rpmbuild/SPECS/$(NAME).spec
 	$(TAR) czf rpmbuild/SOURCES/$(NAME)-$(VERSION).tar.gz \
 		--transform "s,^,$(NAME)-$(VERSION)/," \
-		urpm pyproject.toml README.md QUICKSTART.md CHANGELOG.md LICENSE doc completion man VERSION
+		urpm pyproject.toml README.md QUICKSTART.md CHANGELOG.md LICENSE doc completion man data VERSION
 
 install-completion:
 	install -D -m 644 completion/urpm.bash /etc/bash_completion.d/urpm
