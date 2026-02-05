@@ -7,16 +7,23 @@ Exposes urpm PackageOperations over the system bus at:
 Authorization is handled via PolicyKit for all privileged operations.
 Read-only operations (search, info, list updates) require no auth.
 
+Write operations (install, remove, upgrade, refresh) run in a background
+thread and emit OperationProgress/OperationComplete D-Bus signals.
+
 Usage:
     urpm-dbus-service          # Run as D-Bus activated service
     urpm-dbus-service --debug  # Run with debug logging
 """
 
+import json
 import logging
 import os
+import platform
 import signal
 import sys
 import threading
+import uuid
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -44,7 +51,9 @@ class UrpmDBusService:
         self._polkit = None
         self._audit = None
         self._loop = None
+        self._connection = None
         self._active_operations = {}
+        self._lock = threading.Lock()
 
     def _init_core(self):
         """Lazy-init core components."""
@@ -68,7 +77,6 @@ class UrpmDBusService:
             gi.require_version('Gio', '2.0')
             from gi.repository import Gio, GLib
 
-            # Use the bus connection to get credentials
             result = bus.call_sync(
                 'org.freedesktop.DBus',
                 '/org/freedesktop/DBus',
@@ -77,8 +85,7 @@ class UrpmDBusService:
                 GLib.Variant('(s)', (sender,)),
                 GLib.VariantType.new('(u)'),
                 Gio.DBusCallFlags.NONE,
-                -1,
-                None,
+                -1, None,
             )
             pid = result.unpack()[0]
 
@@ -90,8 +97,7 @@ class UrpmDBusService:
                 GLib.Variant('(s)', (sender,)),
                 GLib.VariantType.new('(u)'),
                 Gio.DBusCallFlags.NONE,
-                -1,
-                None,
+                -1, None,
             )
             uid = result.unpack()[0]
 
@@ -102,8 +108,6 @@ class UrpmDBusService:
 
     def _authorize(self, bus, sender, permission):
         """Authorize a caller for a permission. Returns AuthContext or None."""
-        from ..auth.context import Permission
-
         pid, uid = self._get_caller_credentials(bus, sender)
         if pid is None:
             return None
@@ -121,24 +125,75 @@ class UrpmDBusService:
             return None
 
     # =====================================================================
-    # D-Bus method handlers
+    # D-Bus signal emission
+    # =====================================================================
+
+    def _emit_progress(self, op_id, phase, package, current, total, message=""):
+        """Emit OperationProgress signal on the main loop thread."""
+        from gi.repository import GLib
+
+        def _emit():
+            if self._connection:
+                self._connection.emit_signal(
+                    None, OBJECT_PATH, INTERFACE_NAME,
+                    "OperationProgress",
+                    GLib.Variant('(sssuus)', (
+                        op_id, phase, package,
+                        current, total, message
+                    ))
+                )
+            return False  # Don't repeat
+
+        GLib.idle_add(_emit)
+
+    def _emit_complete(self, op_id, success, message=""):
+        """Emit OperationComplete signal on the main loop thread."""
+        from gi.repository import GLib
+
+        def _emit():
+            if self._connection:
+                self._connection.emit_signal(
+                    None, OBJECT_PATH, INTERFACE_NAME,
+                    "OperationComplete",
+                    GLib.Variant('(sbs)', (op_id, success, message))
+                )
+            return False
+
+        GLib.idle_add(_emit)
+
+    def _return_invocation(self, invocation, success, error=""):
+        """Return D-Bus method result on the main loop thread."""
+        from gi.repository import GLib
+
+        def _return():
+            try:
+                invocation.return_value(
+                    GLib.Variant('(bs)', (success, error))
+                )
+            except Exception as e:
+                logger.error(f"Failed to return invocation: {e}")
+            return False
+
+        GLib.idle_add(_return)
+
+    # =====================================================================
+    # Read-only handlers (synchronous)
     # =====================================================================
 
     def handle_search_packages(self, bus, sender, pattern, search_provides):
-        """SearchPackages(pattern: s, search_provides: b) -> aa{sv}"""
+        """SearchPackages(pattern: s, search_provides: b) -> s (JSON)"""
         self._init_core()
-        results = self._ops.search_packages(
+        return self._ops.search_packages(
             pattern, search_provides=search_provides, limit=200
         )
-        return results
 
     def handle_get_package_info(self, bus, sender, identifier):
-        """GetPackageInfo(identifier: s) -> a{sv}"""
+        """GetPackageInfo(identifier: s) -> s (JSON)"""
         self._init_core()
         return self._ops.get_package_info(identifier)
 
     def handle_get_updates(self, bus, sender):
-        """GetUpdates() -> (b, aa{sv}, as)"""
+        """GetUpdates() -> s (JSON)"""
         self._init_core()
         success, upgrades, problems = self._ops.get_updates()
 
@@ -154,11 +209,299 @@ class UrpmDBusService:
 
         return success, upgrade_dicts, problems
 
-    def handle_install_packages(self, bus, sender, package_names, options):
-        """InstallPackages(packages: as, options: a{sv}) -> (bs)
+    # =====================================================================
+    # Write handlers (async via thread)
+    # =====================================================================
 
-        Returns (success, error_message).
-        """
+    def _run_install(self, op_id, context, package_names, invocation):
+        """Install packages in a background thread."""
+        from ..core.resolver import Resolver
+        from ..core.operations import InstallOptions
+
+        try:
+            self._emit_progress(op_id, "resolving", "", 0, 0)
+
+            resolver = Resolver(self._db, arch=platform.machine())
+            result = resolver.resolve_install(package_names)
+
+            if not result.success:
+                problems = "; ".join(result.problems) if result.problems else "Resolution failed"
+                self._emit_complete(op_id, False, problems)
+                self._return_invocation(invocation, False, problems)
+                return
+
+            actions = result.actions
+            if not actions:
+                self._emit_complete(op_id, True, "Nothing to do")
+                self._return_invocation(invocation, True, "Nothing to do")
+                return
+
+            # Build download items
+            self._emit_progress(op_id, "downloading", "", 0, len(actions))
+            download_items, local_paths = self._ops.build_download_items(
+                actions, resolver
+            )
+
+            # Download
+            rpm_paths = list(local_paths)
+            if download_items:
+                def dl_progress(name, pkg_num, pkg_total, dl_bytes, dl_total,
+                               item_bytes=None, item_total=None, active_downloads=None):
+                    self._emit_progress(
+                        op_id, "downloading", name or "", pkg_num, pkg_total
+                    )
+
+                dl_results, downloaded, cached, _ = self._ops.download_packages(
+                    download_items, progress_callback=dl_progress
+                )
+                for r in dl_results:
+                    if r.get('path'):
+                        rpm_paths.append(r['path'])
+
+            if not rpm_paths:
+                self._emit_complete(op_id, False, "No packages downloaded")
+                self._return_invocation(invocation, False, "No packages downloaded")
+                return
+
+            # Transaction
+            transaction_id = self._ops.begin_transaction(
+                'install', f"dbus:InstallPackages {' '.join(package_names)}",
+                actions
+            )
+
+            # Install
+            self._emit_progress(op_id, "installing", "", 0, len(rpm_paths))
+
+            def install_progress(op, name, current, total):
+                self._emit_progress(op_id, "installing", name, current, total)
+
+            options = InstallOptions()
+            self._ops.execute_install(
+                rpm_paths, options=options,
+                progress_callback=install_progress,
+                auth_context=context
+            )
+
+            self._ops.mark_dependencies(resolver, actions)
+            self._ops.complete_transaction(transaction_id)
+            self._ops.notify_urpmd_cache_invalidate()
+
+            msg = f"Installed {len(rpm_paths)} package(s)"
+            self._emit_complete(op_id, True, msg)
+            self._return_invocation(invocation, True, msg)
+
+        except Exception as e:
+            logger.exception(f"Install failed: {e}")
+            self._emit_complete(op_id, False, str(e))
+            self._return_invocation(invocation, False, str(e))
+        finally:
+            with self._lock:
+                self._active_operations.pop(op_id, None)
+
+    def _run_remove(self, op_id, context, package_names, invocation):
+        """Remove packages in a background thread."""
+        from ..core.resolver import Resolver
+        from ..core.operations import InstallOptions
+
+        try:
+            self._emit_progress(op_id, "resolving", "", 0, 0)
+
+            resolver = Resolver(self._db, arch=platform.machine())
+            result = resolver.resolve_remove(package_names)
+
+            if not result.success:
+                problems = "; ".join(result.problems) if result.problems else "Resolution failed"
+                self._emit_complete(op_id, False, problems)
+                self._return_invocation(invocation, False, problems)
+                return
+
+            actions = result.actions
+            if not actions:
+                self._emit_complete(op_id, True, "Nothing to do")
+                self._return_invocation(invocation, True, "Nothing to do")
+                return
+
+            # Build list of packages to remove
+            from ..core.resolver import TransactionType
+            remove_names = [a.name for a in actions
+                           if a.action == TransactionType.REMOVE]
+
+            if not remove_names:
+                self._emit_complete(op_id, True, "Nothing to remove")
+                self._return_invocation(invocation, True, "Nothing to remove")
+                return
+
+            # Transaction
+            transaction_id = self._ops.begin_transaction(
+                'remove', f"dbus:RemovePackages {' '.join(package_names)}",
+                actions
+            )
+
+            # Execute removal
+            self._emit_progress(op_id, "removing", "", 0, len(remove_names))
+
+            def erase_progress(op, name, current, total):
+                self._emit_progress(op_id, "removing", name, current, total)
+
+            options = InstallOptions()
+            self._ops.execute_erase(
+                remove_names, options=options,
+                progress_callback=erase_progress,
+                auth_context=context
+            )
+
+            self._ops.complete_transaction(transaction_id)
+
+            msg = f"Removed {len(remove_names)} package(s)"
+            self._emit_complete(op_id, True, msg)
+            self._return_invocation(invocation, True, msg)
+
+        except Exception as e:
+            logger.exception(f"Remove failed: {e}")
+            self._emit_complete(op_id, False, str(e))
+            self._return_invocation(invocation, False, str(e))
+        finally:
+            with self._lock:
+                self._active_operations.pop(op_id, None)
+
+    def _run_upgrade(self, op_id, context, invocation):
+        """Upgrade system packages in a background thread."""
+        from ..core.resolver import Resolver, TransactionType
+        from ..core.operations import InstallOptions
+
+        try:
+            self._emit_progress(op_id, "resolving", "", 0, 0)
+
+            resolver = Resolver(self._db, arch=platform.machine())
+            result = resolver.resolve_upgrade()
+
+            if not result.success:
+                problems = "; ".join(result.problems) if result.problems else "Resolution failed"
+                self._emit_complete(op_id, False, problems)
+                self._return_invocation(invocation, False, problems)
+                return
+
+            actions = result.actions
+            if not actions:
+                msg = "System is up to date"
+                self._emit_complete(op_id, True, msg)
+                self._return_invocation(invocation, True, msg)
+                return
+
+            # Separate upgrades and removals
+            upgrade_actions = [a for a in actions if a.action != TransactionType.REMOVE]
+            remove_names = [a.name for a in actions if a.action == TransactionType.REMOVE]
+
+            # Build download items for upgrades
+            self._emit_progress(op_id, "downloading", "", 0, len(upgrade_actions))
+            download_items, local_paths = self._ops.build_download_items(
+                actions, resolver
+            )
+
+            # Download
+            rpm_paths = list(local_paths)
+            if download_items:
+                def dl_progress(name, pkg_num, pkg_total, dl_bytes, dl_total,
+                               item_bytes=None, item_total=None, active_downloads=None):
+                    self._emit_progress(
+                        op_id, "downloading", name or "", pkg_num, pkg_total
+                    )
+
+                dl_results, downloaded, cached, _ = self._ops.download_packages(
+                    download_items, progress_callback=dl_progress
+                )
+                for r in dl_results:
+                    if r.get('path'):
+                        rpm_paths.append(r['path'])
+
+            if not rpm_paths and not remove_names:
+                msg = "Nothing to upgrade"
+                self._emit_complete(op_id, True, msg)
+                self._return_invocation(invocation, True, msg)
+                return
+
+            # Transaction
+            transaction_id = self._ops.begin_transaction(
+                'upgrade', "dbus:UpgradePackages", actions
+            )
+
+            # Execute upgrade
+            total = len(rpm_paths) + len(remove_names)
+            self._emit_progress(op_id, "upgrading", "", 0, total)
+
+            def upgrade_progress(op, name, current, total_q):
+                self._emit_progress(op_id, "upgrading", name, current, total_q)
+
+            options = InstallOptions()
+            self._ops.execute_upgrade(
+                rpm_paths, erase_names=remove_names,
+                options=options,
+                progress_callback=upgrade_progress,
+                auth_context=context
+            )
+
+            self._ops.mark_dependencies(resolver, actions)
+            self._ops.complete_transaction(transaction_id)
+            self._ops.notify_urpmd_cache_invalidate()
+
+            msg = f"Upgraded {len(rpm_paths)} package(s)"
+            if remove_names:
+                msg += f", removed {len(remove_names)}"
+            self._emit_complete(op_id, True, msg)
+            self._return_invocation(invocation, True, msg)
+
+        except Exception as e:
+            logger.exception(f"Upgrade failed: {e}")
+            self._emit_complete(op_id, False, str(e))
+            self._return_invocation(invocation, False, str(e))
+        finally:
+            with self._lock:
+                self._active_operations.pop(op_id, None)
+
+    def _run_refresh(self, op_id, context, invocation):
+        """Refresh metadata in a background thread."""
+        try:
+            from ..core.sync import sync_all_media
+
+            self._emit_progress(op_id, "refreshing", "", 0, 0)
+
+            def refresh_progress(media_name, stage, current, total):
+                self._emit_progress(
+                    op_id, "refreshing", media_name, current, total, stage
+                )
+
+            results = sync_all_media(self._db, refresh_progress, force=True)
+
+            success_count = sum(1 for r in results if r.success)
+            fail_count = sum(1 for r in results if not r.success)
+
+            if fail_count == 0:
+                msg = f"Refreshed {success_count} media"
+                self._emit_complete(op_id, True, msg)
+                self._return_invocation(invocation, True, msg)
+            else:
+                errors = [f"{r.media_name}: {r.error}" for r in results if not r.success]
+                msg = f"Refreshed {success_count}, failed {fail_count}: {'; '.join(errors)}"
+                self._emit_complete(op_id, fail_count == len(results), msg)
+                self._return_invocation(
+                    invocation, success_count > 0, msg
+                )
+
+        except Exception as e:
+            logger.exception(f"Refresh failed: {e}")
+            self._emit_complete(op_id, False, str(e))
+            self._return_invocation(invocation, False, str(e))
+        finally:
+            with self._lock:
+                self._active_operations.pop(op_id, None)
+
+    # =====================================================================
+    # Write method dispatchers
+    # =====================================================================
+
+    def handle_install_packages(self, bus, sender, package_names, options,
+                                invocation):
+        """InstallPackages - async via thread."""
         from ..auth.context import Permission
 
         self._init_core()
@@ -167,12 +510,21 @@ class UrpmDBusService:
         if context is None:
             return False, "Authorization denied"
 
-        # TODO: resolve packages, download, install via self._ops
-        # For now, return a placeholder indicating the service works
-        return False, "Not yet implemented - use CLI"
+        op_id = str(uuid.uuid4())[:8]
+        with self._lock:
+            self._active_operations[op_id] = "install"
 
-    def handle_remove_packages(self, bus, sender, package_names, options):
-        """RemovePackages(packages: as, options: a{sv}) -> (bs)"""
+        thread = threading.Thread(
+            target=self._run_install,
+            args=(op_id, context, list(package_names), invocation),
+            daemon=True,
+        )
+        thread.start()
+        return None  # Signal: invocation will be returned later
+
+    def handle_remove_packages(self, bus, sender, package_names, options,
+                               invocation):
+        """RemovePackages - async via thread."""
         from ..auth.context import Permission
 
         self._init_core()
@@ -181,10 +533,20 @@ class UrpmDBusService:
         if context is None:
             return False, "Authorization denied"
 
-        return False, "Not yet implemented - use CLI"
+        op_id = str(uuid.uuid4())[:8]
+        with self._lock:
+            self._active_operations[op_id] = "remove"
 
-    def handle_upgrade_packages(self, bus, sender, options):
-        """UpgradePackages(options: a{sv}) -> (bs)"""
+        thread = threading.Thread(
+            target=self._run_remove,
+            args=(op_id, context, list(package_names), invocation),
+            daemon=True,
+        )
+        thread.start()
+        return None
+
+    def handle_upgrade_packages(self, bus, sender, options, invocation):
+        """UpgradePackages - async via thread."""
         from ..auth.context import Permission
 
         self._init_core()
@@ -193,10 +555,20 @@ class UrpmDBusService:
         if context is None:
             return False, "Authorization denied"
 
-        return False, "Not yet implemented - use CLI"
+        op_id = str(uuid.uuid4())[:8]
+        with self._lock:
+            self._active_operations[op_id] = "upgrade"
 
-    def handle_refresh_metadata(self, bus, sender):
-        """RefreshMetadata() -> (bs)"""
+        thread = threading.Thread(
+            target=self._run_upgrade,
+            args=(op_id, context, invocation),
+            daemon=True,
+        )
+        thread.start()
+        return None
+
+    def handle_refresh_metadata(self, bus, sender, invocation):
+        """RefreshMetadata - async via thread."""
         from ..auth.context import Permission
 
         self._init_core()
@@ -205,7 +577,17 @@ class UrpmDBusService:
         if context is None:
             return False, "Authorization denied"
 
-        return False, "Not yet implemented - use CLI"
+        op_id = str(uuid.uuid4())[:8]
+        with self._lock:
+            self._active_operations[op_id] = "refresh"
+
+        thread = threading.Thread(
+            target=self._run_refresh,
+            args=(op_id, context, invocation),
+            daemon=True,
+        )
+        thread.start()
+        return None
 
     # =====================================================================
     # D-Bus registration (GLib/Gio)
@@ -269,11 +651,7 @@ class UrpmDBusService:
     def _on_method_call(self, connection, sender, object_path, interface_name,
                         method_name, parameters, invocation):
         """Handle incoming D-Bus method calls."""
-        import json
-
         try:
-            import gi
-            gi.require_version('Gio', '2.0')
             from gi.repository import GLib
 
             if method_name == "SearchPackages":
@@ -309,38 +687,48 @@ class UrpmDBusService:
 
             elif method_name == "InstallPackages":
                 packages, options = parameters.unpack()
-                success, error = self.handle_install_packages(
-                    connection, sender, packages, options
+                ret = self.handle_install_packages(
+                    connection, sender, packages, options, invocation
                 )
-                invocation.return_value(
-                    GLib.Variant('(bs)', (success, error))
-                )
+                if ret is not None:
+                    # Auth denied - return synchronously
+                    success, error = ret
+                    invocation.return_value(
+                        GLib.Variant('(bs)', (success, error))
+                    )
+                # else: invocation returned async from thread
 
             elif method_name == "RemovePackages":
                 packages, options = parameters.unpack()
-                success, error = self.handle_remove_packages(
-                    connection, sender, packages, options
+                ret = self.handle_remove_packages(
+                    connection, sender, packages, options, invocation
                 )
-                invocation.return_value(
-                    GLib.Variant('(bs)', (success, error))
-                )
+                if ret is not None:
+                    success, error = ret
+                    invocation.return_value(
+                        GLib.Variant('(bs)', (success, error))
+                    )
 
             elif method_name == "UpgradePackages":
                 options = parameters.unpack()[0]
-                success, error = self.handle_upgrade_packages(
-                    connection, sender, options
+                ret = self.handle_upgrade_packages(
+                    connection, sender, options, invocation
                 )
-                invocation.return_value(
-                    GLib.Variant('(bs)', (success, error))
-                )
+                if ret is not None:
+                    success, error = ret
+                    invocation.return_value(
+                        GLib.Variant('(bs)', (success, error))
+                    )
 
             elif method_name == "RefreshMetadata":
-                success, error = self.handle_refresh_metadata(
-                    connection, sender
+                ret = self.handle_refresh_metadata(
+                    connection, sender, invocation
                 )
-                invocation.return_value(
-                    GLib.Variant('(bs)', (success, error))
-                )
+                if ret is not None:
+                    success, error = ret
+                    invocation.return_value(
+                        GLib.Variant('(bs)', (success, error))
+                    )
 
             else:
                 invocation.return_dbus_error(
@@ -375,6 +763,7 @@ class UrpmDBusService:
 
         def on_bus_acquired(connection, name):
             logger.info(f"Bus acquired: {name}")
+            self._connection = connection
             connection.register_object(
                 OBJECT_PATH,
                 interface_info,
