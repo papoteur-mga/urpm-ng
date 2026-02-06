@@ -520,6 +520,166 @@ class PackageOperations:
         """
         return self.db.get_package_smart(identifier)
 
+    def resolve_packages(self, names: List[str]) -> List[Dict]:
+        """Batch resolve: get info for multiple packages at once.
+
+        Much more efficient than calling get_package_info N times.
+
+        Args:
+            names: List of package names
+
+        Returns:
+            List of package dicts with name, version, release, arch, summary, installed
+        """
+        return self.db.get_packages_by_names(names)
+
+    def search_files(self, pattern: str, limit: int = 100) -> List[Dict]:
+        """Search for files matching a pattern.
+
+        Args:
+            pattern: File path pattern (glob-style)
+            limit: Maximum results
+
+        Returns:
+            List of dicts with file_path, pkg_nevra, media_name
+        """
+        return self.db.search_files(pattern, limit=limit)
+
+    def get_package_files(self, nevra: str) -> List[str]:
+        """Get list of files for a package.
+
+        Args:
+            nevra: Package NEVRA
+
+        Returns:
+            List of file paths
+        """
+        return self.db.get_package_files(nevra)
+
+    def get_installed_packages(self) -> List[Dict]:
+        """Get list of all installed packages.
+
+        Returns:
+            List of dicts with name, version, release, arch, summary
+        """
+        import subprocess
+
+        result = subprocess.run(
+            ['rpm', '-qa', '--qf', '%{NAME}\\t%{VERSION}\\t%{RELEASE}\\t%{ARCH}\\t%{SUMMARY}\\n'],
+            capture_output=True,
+            timeout=60
+        )
+
+        packages = []
+        for line in result.stdout.decode(errors='replace').splitlines():
+            parts = line.split('\t', 4)
+            if len(parts) >= 4:
+                packages.append({
+                    'name': parts[0],
+                    'version': parts[1],
+                    'release': parts[2],
+                    'arch': parts[3],
+                    'summary': parts[4] if len(parts) > 4 else '',
+                    'installed': True,
+                })
+
+        return packages
+
+    def download_to_directory(
+        self,
+        package_names: List[str],
+        directory: str,
+        progress_callback: Callable = None
+    ) -> Tuple[bool, List[str], str]:
+        """Download packages to a specific directory.
+
+        Args:
+            package_names: List of package names to download
+            directory: Destination directory
+            progress_callback: Optional progress callback
+
+        Returns:
+            (success, list of downloaded file paths, error message)
+        """
+        import shutil
+        from pathlib import Path
+
+        dest_dir = Path(directory)
+        if not dest_dir.exists():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Resolve packages
+        download_items, _ = self.resolve_install(package_names)
+        if not download_items:
+            return False, [], "No packages to download"
+
+        # Download to cache
+        dl_results, downloaded, cached, _ = self.download_packages(
+            download_items, progress_callback=progress_callback
+        )
+
+        # Copy/link to destination directory
+        downloaded_paths = []
+        for item, result in zip(download_items, dl_results):
+            if result.success and result.path:
+                src = Path(result.path)
+                dest = dest_dir / src.name
+                try:
+                    shutil.copy2(src, dest)
+                    downloaded_paths.append(str(dest))
+                except Exception as e:
+                    return False, downloaded_paths, f"Failed to copy {src.name}: {e}"
+
+        return True, downloaded_paths, ""
+
+    def whatrequires(self, package_name: str) -> List[Dict]:
+        """Find packages that require a given package.
+
+        Args:
+            package_name: Package name to check
+
+        Returns:
+            List of package dicts that depend on this package
+        """
+        return self.db.whatrequires(package_name)
+
+    def install_local_files(
+        self,
+        rpm_paths: List[str],
+        progress_callback: Callable = None
+    ) -> Tuple[bool, str]:
+        """Install local RPM files.
+
+        Args:
+            rpm_paths: List of paths to RPM files
+            progress_callback: Optional progress callback
+
+        Returns:
+            (success, error message)
+        """
+        import subprocess
+        from pathlib import Path
+
+        # Verify files exist
+        for path in rpm_paths:
+            if not Path(path).exists():
+                return False, f"File not found: {path}"
+
+        # Install with rpm
+        try:
+            result = subprocess.run(
+                ['rpm', '-Uvh', '--replacepkgs'] + rpm_paths,
+                capture_output=True,
+                timeout=600
+            )
+            if result.returncode != 0:
+                return False, result.stderr.decode(errors='replace')
+            return True, ""
+        except subprocess.TimeoutExpired:
+            return False, "Installation timed out"
+        except Exception as e:
+            return False, str(e)
+
     def get_updates(self, arch: str = None) -> Tuple[bool, list, list]:
         """Get list of available updates.
 

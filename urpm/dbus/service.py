@@ -53,6 +53,7 @@ class UrpmDBusService:
         self._loop = None
         self._connection = None
         self._active_operations = {}
+        self._cancel_requested = False
         self._lock = threading.Lock()
 
     def _init_core(self):
@@ -192,6 +193,102 @@ class UrpmDBusService:
         self._init_core()
         return self._ops.get_package_info(identifier)
 
+    def handle_resolve_packages(self, bus, sender, names):
+        """ResolvePackages(names: as) -> s (JSON)
+
+        Batch resolve: returns installed status for multiple packages at once.
+        Much faster than calling SearchPackages N times.
+        """
+        self._init_core()
+        import json
+
+        # Use batch method for efficiency
+        results = self._ops.resolve_packages(list(names))
+        return json.dumps(results)
+
+    def handle_search_files(self, bus, sender, pattern):
+        """SearchFiles(pattern: s) -> s (JSON)
+
+        Search for files matching a pattern.
+        """
+        self._init_core()
+        import json
+
+        results = self._ops.search_files(pattern, limit=100)
+        return json.dumps(results)
+
+    def handle_get_package_files(self, bus, sender, nevra):
+        """GetPackageFiles(nevra: s) -> s (JSON)
+
+        Get list of files in a package.
+        """
+        self._init_core()
+        import json
+
+        files = self._ops.get_package_files(nevra)
+        return json.dumps(files)
+
+    def handle_get_installed_packages(self, bus, sender):
+        """GetInstalledPackages() -> s (JSON)
+
+        Get list of all installed packages.
+        """
+        self._init_core()
+        import json
+
+        packages = self._ops.get_installed_packages()
+        return json.dumps(packages)
+
+    def handle_download_packages(self, bus, sender, package_names, directory):
+        """DownloadPackages(packages: as, directory: s) -> s (JSON)
+
+        Download packages to a specific directory.
+        """
+        self._init_core()
+        import json
+
+        success, paths, error = self._ops.download_to_directory(
+            list(package_names), directory
+        )
+        return json.dumps({
+            'success': success,
+            'paths': paths,
+            'error': error
+        })
+
+    def handle_whatrequires(self, bus, sender, package_name):
+        """WhatRequires(package: s) -> s (JSON)
+
+        Find packages that require a given package.
+        """
+        self._init_core()
+        import json
+
+        packages = self._ops.whatrequires(package_name)
+        return json.dumps(packages)
+
+    def handle_install_files(self, bus, sender, rpm_paths):
+        """InstallFiles(paths: as) -> s (JSON)
+
+        Install local RPM files.
+        """
+        self._init_core()
+        import json
+
+        success, error = self._ops.install_local_files(list(rpm_paths))
+        return json.dumps({
+            'success': success,
+            'error': error
+        })
+
+    def handle_cancel_operation(self, bus, sender):
+        """CancelOperation() -> b
+
+        Request cancellation of the current operation.
+        """
+        self._cancel_requested = True
+        return True
+
     def handle_get_updates(self, bus, sender):
         """GetUpdates() -> s (JSON)"""
         self._init_core()
@@ -209,6 +306,44 @@ class UrpmDBusService:
 
         return success, upgrade_dicts, problems
 
+    def handle_preview_install(self, bus, sender, package_names):
+        """PreviewInstall(as) -> s (JSON)
+
+        Resolve dependencies without downloading or installing.
+        Returns list of packages that would be installed.
+        """
+        self._init_core()
+
+        from ..core.resolver import Resolver
+
+        resolver = Resolver(self._db, arch=platform.machine())
+        result = resolver.resolve_install(list(package_names))
+
+        to_install = []
+        if result.success and result.actions:
+            for action in result.actions:
+                # evr is "version-release", split it
+                evr = action.evr
+                if '-' in evr:
+                    version, release = evr.rsplit('-', 1)
+                else:
+                    version, release = evr, '1'
+
+                to_install.append({
+                    'name': action.name,
+                    'version': version,
+                    'release': release,
+                    'arch': action.arch,
+                    'summary': '',  # Not available in PackageAction
+                    'size': action.size or 0,
+                })
+
+        return {
+            'success': result.success,
+            'to_install': to_install,
+            'problems': result.problems or [],
+        }
+
     # =====================================================================
     # Write handlers (async via thread)
     # =====================================================================
@@ -219,10 +354,25 @@ class UrpmDBusService:
         from ..core.operations import InstallOptions
 
         try:
+            logger.info(f"_run_install: packages={package_names}")
             self._emit_progress(op_id, "resolving", "", 0, 0)
 
             resolver = Resolver(self._db, arch=platform.machine())
             result = resolver.resolve_install(package_names)
+
+            logger.info(f"_run_install: resolve success={result.success}, actions={len(result.actions) if result.actions else 0}, problems={result.problems}, alternatives={len(result.alternatives) if result.alternatives else 0}")
+
+            # Handle alternatives: auto-pick first provider for each
+            if not result.success and result.alternatives:
+                choices = {}
+                for alt in result.alternatives:
+                    if alt.providers:
+                        choices[alt.capability] = alt.providers[0]
+                        logger.info(f"_run_install: auto-picking {alt.providers[0]} for {alt.capability}")
+
+                # Re-resolve with choices
+                result = resolver.resolve_install(package_names, choices=choices)
+                logger.info(f"_run_install: re-resolve success={result.success}, actions={len(result.actions) if result.actions else 0}")
 
             if not result.success:
                 problems = "; ".join(result.problems) if result.problems else "Resolution failed"
@@ -232,6 +382,7 @@ class UrpmDBusService:
 
             actions = result.actions
             if not actions:
+                logger.info(f"_run_install: No actions - packages may already be installed")
                 self._emit_complete(op_id, True, "Nothing to do")
                 self._return_invocation(invocation, True, "Nothing to do")
                 return
@@ -275,20 +426,49 @@ class UrpmDBusService:
             def install_progress(op, name, current, total):
                 self._emit_progress(op_id, "installing", name, current, total)
 
-            options = InstallOptions()
-            self._ops.execute_install(
+            options = InstallOptions(sync=True)
+            result = self._ops.execute_install(
                 rpm_paths, options=options,
                 progress_callback=install_progress,
                 auth_context=context
             )
 
+            logger.info(f"_run_install: execute_install returned success={result.success}")
+
+            # Check if installation actually succeeded
+            if not result.success:
+                errors = result.overall_error or "; ".join(
+                    e for op in result.operations for e in op.errors
+                )
+                self._ops.abort_transaction(transaction_id)
+                self._emit_complete(op_id, False, errors or "Installation failed")
+                self._return_invocation(invocation, False, errors or "Installation failed")
+                return
+
             self._ops.mark_dependencies(resolver, actions)
             self._ops.complete_transaction(transaction_id)
             self._ops.notify_urpmd_cache_invalidate()
 
-            msg = f"Installed {len(rpm_paths)} package(s)"
+            # Build list of installed packages for PackageKit
+            installed_pkgs = []
+            for action in actions:
+                evr = action.evr
+                if '-' in evr:
+                    version, release = evr.rsplit('-', 1)
+                else:
+                    version, release = evr, '1'
+                installed_pkgs.append({
+                    'name': action.name,
+                    'version': version,
+                    'release': release,
+                    'arch': action.arch,
+                })
+
+            msg = json.dumps({'message': f"Installed {len(rpm_paths)} package(s)", 'packages': installed_pkgs})
+            logger.info(f"_run_install: emitting complete, success=True")
             self._emit_complete(op_id, True, msg)
             self._return_invocation(invocation, True, msg)
+            logger.info(f"_run_install: done")
 
         except Exception as e:
             logger.exception(f"Install failed: {e}")
@@ -343,12 +523,22 @@ class UrpmDBusService:
             def erase_progress(op, name, current, total):
                 self._emit_progress(op_id, "removing", name, current, total)
 
-            options = InstallOptions()
-            self._ops.execute_erase(
+            options = InstallOptions(sync=True)
+            result = self._ops.execute_erase(
                 remove_names, options=options,
                 progress_callback=erase_progress,
                 auth_context=context
             )
+
+            # Check if removal actually succeeded
+            if not result.success:
+                errors = result.overall_error or "; ".join(
+                    e for op in result.operations for e in op.errors
+                )
+                self._ops.abort_transaction(transaction_id)
+                self._emit_complete(op_id, False, errors or "Removal failed")
+                self._return_invocation(invocation, False, errors or "Removal failed")
+                return
 
             self._ops.complete_transaction(transaction_id)
 
@@ -432,7 +622,7 @@ class UrpmDBusService:
             def upgrade_progress(op, name, current, total_q):
                 self._emit_progress(op_id, "upgrading", name, current, total_q)
 
-            options = InstallOptions()
+            options = InstallOptions(sync=True)
             self._ops.execute_upgrade(
                 rpm_paths, erase_names=remove_names,
                 options=options,
@@ -472,15 +662,15 @@ class UrpmDBusService:
 
             results = sync_all_media(self._db, refresh_progress, force=True)
 
-            success_count = sum(1 for r in results if r.success)
-            fail_count = sum(1 for r in results if not r.success)
+            success_count = sum(1 for _n, r in results if r.success)
+            fail_count = sum(1 for _n, r in results if not r.success)
 
             if fail_count == 0:
                 msg = f"Refreshed {success_count} media"
                 self._emit_complete(op_id, True, msg)
                 self._return_invocation(invocation, True, msg)
             else:
-                errors = [f"{r.media_name}: {r.error}" for r in results if not r.success]
+                errors = [f"{name}: {r.error}" for name, r in results if not r.success]
                 msg = f"Refreshed {success_count}, failed {fail_count}: {'; '.join(errors)}"
                 self._emit_complete(op_id, fail_count == len(results), msg)
                 self._return_invocation(
@@ -607,7 +797,42 @@ class UrpmDBusService:
       <arg name="identifier" type="s" direction="in"/>
       <arg name="info" type="s" direction="out"/>
     </method>
+    <method name="ResolvePackages">
+      <arg name="names" type="as" direction="in"/>
+      <arg name="results" type="s" direction="out"/>
+    </method>
+    <method name="SearchFiles">
+      <arg name="pattern" type="s" direction="in"/>
+      <arg name="results" type="s" direction="out"/>
+    </method>
+    <method name="GetPackageFiles">
+      <arg name="nevra" type="s" direction="in"/>
+      <arg name="files" type="s" direction="out"/>
+    </method>
+    <method name="GetInstalledPackages">
+      <arg name="packages" type="s" direction="out"/>
+    </method>
+    <method name="DownloadPackages">
+      <arg name="packages" type="as" direction="in"/>
+      <arg name="directory" type="s" direction="in"/>
+      <arg name="result" type="s" direction="out"/>
+    </method>
+    <method name="WhatRequires">
+      <arg name="package" type="s" direction="in"/>
+      <arg name="packages" type="s" direction="out"/>
+    </method>
+    <method name="InstallFiles">
+      <arg name="paths" type="as" direction="in"/>
+      <arg name="result" type="s" direction="out"/>
+    </method>
+    <method name="CancelOperation">
+      <arg name="success" type="b" direction="out"/>
+    </method>
     <method name="GetUpdates">
+      <arg name="result" type="s" direction="out"/>
+    </method>
+    <method name="PreviewInstall">
+      <arg name="packages" type="as" direction="in"/>
       <arg name="result" type="s" direction="out"/>
     </method>
     <method name="InstallPackages">
@@ -672,6 +897,76 @@ class UrpmDBusService:
                     GLib.Variant('(s)', (json.dumps(info),))
                 )
 
+            elif method_name == "ResolvePackages":
+                names = parameters.unpack()[0]
+                results = self.handle_resolve_packages(
+                    connection, sender, names
+                )
+                invocation.return_value(
+                    GLib.Variant('(s)', (results,))
+                )
+
+            elif method_name == "SearchFiles":
+                pattern = parameters.unpack()[0]
+                results = self.handle_search_files(
+                    connection, sender, pattern
+                )
+                invocation.return_value(
+                    GLib.Variant('(s)', (results,))
+                )
+
+            elif method_name == "GetPackageFiles":
+                nevra = parameters.unpack()[0]
+                files = self.handle_get_package_files(
+                    connection, sender, nevra
+                )
+                invocation.return_value(
+                    GLib.Variant('(s)', (files,))
+                )
+
+            elif method_name == "GetInstalledPackages":
+                packages = self.handle_get_installed_packages(
+                    connection, sender
+                )
+                invocation.return_value(
+                    GLib.Variant('(s)', (packages,))
+                )
+
+            elif method_name == "DownloadPackages":
+                pkg_names, directory = parameters.unpack()
+                result = self.handle_download_packages(
+                    connection, sender, pkg_names, directory
+                )
+                invocation.return_value(
+                    GLib.Variant('(s)', (result,))
+                )
+
+            elif method_name == "WhatRequires":
+                package = parameters.unpack()[0]
+                packages = self.handle_whatrequires(
+                    connection, sender, package
+                )
+                invocation.return_value(
+                    GLib.Variant('(s)', (packages,))
+                )
+
+            elif method_name == "InstallFiles":
+                paths = parameters.unpack()[0]
+                result = self.handle_install_files(
+                    connection, sender, paths
+                )
+                invocation.return_value(
+                    GLib.Variant('(s)', (result,))
+                )
+
+            elif method_name == "CancelOperation":
+                success = self.handle_cancel_operation(
+                    connection, sender
+                )
+                invocation.return_value(
+                    GLib.Variant('(b)', (success,))
+                )
+
             elif method_name == "GetUpdates":
                 success, upgrades, problems = self.handle_get_updates(
                     connection, sender
@@ -681,6 +976,15 @@ class UrpmDBusService:
                     'upgrades': upgrades,
                     'problems': problems,
                 }
+                invocation.return_value(
+                    GLib.Variant('(s)', (json.dumps(result),))
+                )
+
+            elif method_name == "PreviewInstall":
+                packages = parameters.unpack()[0]
+                result = self.handle_preview_install(
+                    connection, sender, packages
+                )
                 invocation.return_value(
                     GLib.Variant('(s)', (json.dumps(result),))
                 )

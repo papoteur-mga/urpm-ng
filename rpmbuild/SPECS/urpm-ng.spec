@@ -10,8 +10,11 @@ License:        GPLv3+
 Group:          System/Configuration/Packaging
 URL:            https://github.com/pvi-github/urpm-ng
 Source0:        %{name}-%{version}.tar.gz
+Source1:        pk-backend-urpm.tar.gz
 
-BuildArch:      noarch
+# Note: No BuildArch:noarch because we also build the C backend
+
+# Python build requirements
 BuildRequires:  pyproject-rpm-macros
 BuildRequires:  python3-devel
 BuildRequires:  python3-wheel
@@ -40,29 +43,69 @@ urpm-ng is a complete rewrite of the classic urpmi toolset, providing:
 - Background daemon for intelligent caching
 - Seed-based replication for DVD-like mirrors
 
+# ============================================================================
+# Subpackage: pk-backend-urpm (PackageKit backend)
+# ============================================================================
+%package -n pk-backend-urpm
+Summary:        PackageKit backend for urpm-ng
+Group:          System/Configuration/Packaging
+
+# C build requirements (backend headers are bundled from PackageKit source)
+BuildRequires:  meson
+BuildRequires:  gcc
+BuildRequires:  pkgconfig(glib-2.0) >= 2.56
+BuildRequires:  pkgconfig(gio-2.0)
+BuildRequires:  pkgconfig(json-glib-1.0)
+BuildRequires:  pkgconfig(packagekit-glib2) >= 1.0
+
+Requires:       %{name} = %{version}-%{release}
+Requires:       PackageKit
+
+%description -n pk-backend-urpm
+PackageKit backend that uses urpm-ng for package management on Mageia Linux.
+This allows GNOME Software and KDE Discover to manage packages via urpm-ng.
+
+Install this package to use Discover or GNOME Software with urpm-ng.
+
+# ============================================================================
+# Prep
+# ============================================================================
 %prep
 %setup -q
+%setup -q -T -D -a 1
 
 # Check if setuptools < 77.0.0 (old way in mga9)
-# We use packaging.version for clean comparison (fallback to grep if packaging not available)
 if ! python3 -c "import setuptools; from packaging.version import parse; exit(0 if parse(setuptools.__version__) >= parse('77.0.0') else 1)" 2>/dev/null; then
     echo "Adapting pyproject.toml for old setuptools (< 77)"
-    
-    # Remove license-files line (not well supported or useless in old setuptools)
     sed -i '/^[[:space:]]*license-files[[:space:]]*=/d' pyproject.toml
-    
-    # Convert license = "..." to license = { text = "..." }
-    # This version preserves original indentation and only matches lines with at least one space/tab
-    # (to avoid matching random license lines outside [project] – though rare)
     sed -i -E 's/^([[:space:]]*)license = "([^"]*)"/\1license = { text = "\2" }/' pyproject.toml
 fi
 
+# ============================================================================
+# Build
+# ============================================================================
 %build
+# Build Python wheel
 %pyproject_wheel
 
+# Build PackageKit backend
+cd pk-backend-urpm
+%meson
+%meson_build
+cd ..
+
+# ============================================================================
+# Install
+# ============================================================================
 %install
+# Install Python package
 %pyproject_install
 %pyproject_save_files urpm
+
+# Install PackageKit backend
+cd pk-backend-urpm
+%meson_install
+cd ..
 
 # Install systemd services
 install -Dm644 data/urpmd.service %{buildroot}%{_unitdir}/urpmd.service
@@ -101,6 +144,9 @@ install -Dm644 man/en/man8/urpmd.8 %{buildroot}%{_mandir}/man8/urpmd.8
 install -Dm644 man/fr/man1/urpm.1 %{buildroot}%{_mandir}/fr/man1/urpm.1
 install -Dm644 man/fr/man8/urpmd.8 %{buildroot}%{_mandir}/fr/man8/urpmd.8
 
+# ============================================================================
+# Scripts for main package
+# ============================================================================
 %post
 /usr/bin/systemctl daemon-reload >/dev/null 2>&1 || :
 
@@ -168,6 +214,22 @@ if [ $1 -eq 0 ]; then
     fi
 fi
 
+# ============================================================================
+# Scripts for pk-backend-urpm
+# ============================================================================
+%post -n pk-backend-urpm
+# Restart PackageKit to pick up the new backend
+/usr/bin/systemctl try-restart packagekit.service >/dev/null 2>&1 || :
+
+%postun -n pk-backend-urpm
+if [ $1 -eq 0 ]; then
+    # Uninstall: restart PackageKit
+    /usr/bin/systemctl try-restart packagekit.service >/dev/null 2>&1 || :
+fi
+
+# ============================================================================
+# Files
+# ============================================================================
 %files -f %{pyproject_files}
 %license LICENSE
 %doc %{_docdir}/%{name}
@@ -185,5 +247,8 @@ fi
 %{_mandir}/man8/urpmd.8*
 %{_mandir}/fr/man1/urpm.1*
 %{_mandir}/fr/man8/urpmd.8*
+
+%files -n pk-backend-urpm
+%{_libdir}/packagekit-backend/libpk_backend_urpm.so
 
 %changelog
