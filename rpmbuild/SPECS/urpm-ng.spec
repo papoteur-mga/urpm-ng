@@ -1,5 +1,5 @@
 %define name urpm-ng
-%define version 0.1.26
+%define version 0.1.27
 %define release 1
 
 Name:           %{name}
@@ -222,6 +222,20 @@ fi
 # Scripts for pk-backend-urpm
 # ============================================================================
 %post -n pk-backend-urpm
+
+CONFIG_FILE=/etc/PackageKit/PackageKit.conf
+
+# Only for new install, not upgrade
+if [ "$1" -eq 1 ]; then
+    if [ -f "$CONFIG_FILE" ]; then
+        if grep -q "^#\?DefaultBackend=" "$CONFIG_FILE"; then
+            sed -i 's/^#\?DefaultBackend=.*/DefaultBackend=urpm/' "$CONFIG_FILE"
+        else
+            sed -i '/^#DefaultBackend=auto/a DefaultBackend=urpm' "$CONFIG_FILE"
+        fi
+    fi
+fi
+
 # Restart PackageKit to pick up the new backend
 /usr/bin/systemctl try-restart packagekit.service >/dev/null 2>&1 || :
 
