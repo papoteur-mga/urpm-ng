@@ -228,10 +228,15 @@ CONFIG_FILE=/etc/PackageKit/PackageKit.conf
 # Only for new install, not upgrade
 if [ "$1" -eq 1 ]; then
     if [ -f "$CONFIG_FILE" ]; then
-        if grep -q "^#\?DefaultBackend=" "$CONFIG_FILE"; then
-            sed -i 's/^#\?DefaultBackend=.*/DefaultBackend=urpm/' "$CONFIG_FILE"
-        else
-            sed -i '/^#DefaultBackend=auto/a DefaultBackend=urpm' "$CONFIG_FILE"
+        # Check if already configured correctly
+        if grep -q "^DefaultBackend=urpm$" "$CONFIG_FILE"; then
+            : # Already configured
+        elif grep -q "^DefaultBackend=" "$CONFIG_FILE"; then
+            # Replace existing uncommented line
+            sed -i 's/^DefaultBackend=.*/DefaultBackend=urpm/' "$CONFIG_FILE"
+        elif grep -q "^#DefaultBackend=" "$CONFIG_FILE"; then
+            # Add after commented line
+            sed -i '/^#DefaultBackend=/a DefaultBackend=urpm' "$CONFIG_FILE"
         fi
     fi
 fi

@@ -1225,7 +1225,7 @@ pk_backend_get_packages(PkBackend *backend, PkBackendJob *job, PkBitfield filter
 }
 
 static void
-pk_backend_get_depends_thread(PkBackendJob *job, GVariant *params, gpointer user_data)
+pk_backend_depends_on_thread(PkBackendJob *job, GVariant *params, gpointer user_data)
 {
     PkBitfield filters;
     gchar **package_ids;
@@ -1314,14 +1314,14 @@ pk_backend_get_depends_thread(PkBackendJob *job, GVariant *params, gpointer user
 }
 
 void
-pk_backend_get_depends(PkBackend *backend, PkBackendJob *job, PkBitfield filters,
+pk_backend_depends_on(PkBackend *backend, PkBackendJob *job, PkBitfield filters,
                        gchar **package_ids, gboolean recursive)
 {
-    pk_backend_job_thread_create(job, pk_backend_get_depends_thread, NULL, NULL);
+    pk_backend_job_thread_create(job, pk_backend_depends_on_thread, NULL, NULL);
 }
 
 static void
-pk_backend_get_requires_thread(PkBackendJob *job, GVariant *params, gpointer user_data)
+pk_backend_required_by_thread(PkBackendJob *job, GVariant *params, gpointer user_data)
 {
     PkBitfield filters;
     gchar **package_ids;
@@ -1400,10 +1400,10 @@ pk_backend_get_requires_thread(PkBackendJob *job, GVariant *params, gpointer use
 }
 
 void
-pk_backend_get_requires(PkBackend *backend, PkBackendJob *job, PkBitfield filters,
+pk_backend_required_by(PkBackend *backend, PkBackendJob *job, PkBitfield filters,
                         gchar **package_ids, gboolean recursive)
 {
-    pk_backend_job_thread_create(job, pk_backend_get_requires_thread, NULL, NULL);
+    pk_backend_job_thread_create(job, pk_backend_required_by_thread, NULL, NULL);
 }
 
 static void
