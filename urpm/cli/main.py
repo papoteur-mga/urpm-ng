@@ -1227,6 +1227,11 @@ For legacy mode (non-Mageia URL with explicit name):
         action='store_true',
         help='Also download and index files.xml.lzma (enables file search in available packages)'
     )
+    media_update.add_argument(
+        '--no-appstream',
+        action='store_true',
+        help='Skip AppStream metadata sync'
+    )
 
     # media import
     media_import = media_subparsers.add_parser(
@@ -1864,6 +1869,27 @@ Examples:
         '--no-compress',
         action='store_true',
         help='Do not gzip the output file'
+    )
+    appstream_generate.add_argument(
+        '--media', '-m',
+        help='Generate for specific media only'
+    )
+
+    # appstream status
+    appstream_status = appstream_subparsers.add_parser(
+        'status',
+        help='Show AppStream status for all media'
+    )
+
+    # appstream merge
+    appstream_merge = appstream_subparsers.add_parser(
+        'merge',
+        help='Merge per-media AppStream files into unified catalog'
+    )
+    appstream_merge.add_argument(
+        '--refresh', '-r',
+        action='store_true',
+        help='Also refresh system AppStream cache'
     )
 
     # appstream init-distro
@@ -3540,6 +3566,7 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
         return 1
 
     sync_files = getattr(args, 'files', False)
+    skip_appstream = getattr(args, 'no_appstream', False)
 
     def progress(media_name, stage, current, total):
         # Clear line with ANSI escape code, then print
@@ -3562,7 +3589,8 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
             progress(args.name, stage, current, total)
 
         urpm_root = getattr(args, 'urpm_root', None)
-        result = sync_media(db, args.name, single_progress, force=True, urpm_root=urpm_root)
+        result = sync_media(db, args.name, single_progress, force=True,
+                           urpm_root=urpm_root, skip_appstream=skip_appstream)
         print()  # newline after progress
 
         if result.success:
@@ -3625,7 +3653,8 @@ def cmd_media_update(args, db: PackageDatabase) -> int:
                 num_lines = len(media_list)
 
         sync_start = time.time()
-        results = sync_all_media(db, parallel_progress, force=True)
+        results = sync_all_media(db, parallel_progress, force=True,
+                                 skip_appstream=skip_appstream)
         sync_elapsed = time.time() - sync_start
 
         # Clear progress lines
@@ -10647,206 +10676,146 @@ def cmd_peer(args, db: PackageDatabase) -> int:
 
 
 def cmd_appstream(args, db: PackageDatabase) -> int:
-    """Handle appstream command - generate AppStream catalog."""
+    """Handle appstream command - manage AppStream metadata."""
     import gzip
-    import xml.etree.ElementTree as ET
+    from datetime import datetime
     from pathlib import Path
-    from ..core.config import get_system_version
+    from ..core.config import get_system_version, get_base_dir
+    from ..core.appstream import AppStreamManager
     from . import colors
 
+    appstream_mgr = AppStreamManager(db, get_base_dir())
+
     if args.appstream_command in ('generate', 'gen', None):
-        # Get system version for catalog naming
-        version = get_system_version() or 'unknown'
+        media_name = getattr(args, 'media', None)
 
-        # Determine output path (handle missing args when called without subcommand)
-        output_arg = getattr(args, 'output', None)
-        no_compress = getattr(args, 'no_compress', False)
-        if output_arg:
-            output_path = Path(output_arg)
-        else:
-            catalog_dir = Path('/var/cache/swcatalog/xml')
-            catalog_dir.mkdir(parents=True, exist_ok=True)
-            if no_compress:
-                output_path = catalog_dir / f'mageia-{version}.xml'
-            else:
-                output_path = catalog_dir / f'mageia-{version}.xml.gz'
+        if media_name:
+            # Generate for specific media
+            media = db.get_media(media_name)
+            if not media:
+                print(colors.error(f"Media '{media_name}' not found"))
+                return 1
 
-        print(f"Generating AppStream catalog for Mageia {version}...")
-        print(f"Output: {output_path}")
+            print(f"Generating AppStream for {media_name}...")
+            xml_str, count = appstream_mgr.generate_for_media(
+                media['id'], media_name
+            )
 
-        # RPM groups that indicate desktop applications
-        DESKTOP_GROUPS = {
-            # Games
-            'games', 'games/arcade', 'games/boards', 'games/cards', 'games/puzzles',
-            'games/sports', 'games/strategy', 'games/adventure', 'games/rpg',
-            # Graphical desktop applications
-            'graphical desktop/gnome', 'graphical desktop/kde', 'graphical desktop/xfce',
-            'graphical desktop/other',
-            # Office & productivity
-            'office', 'office/suite', 'office/wordprocessor', 'office/spreadsheet',
-            'office/presentation', 'office/database', 'office/finance',
-            # Graphics
-            'graphics', 'graphics/viewer', 'graphics/editor', 'graphics/3d',
-            'graphics/photography', 'graphics/scanning',
-            # Multimedia
-            'video', 'video/players', 'video/editors',
-            'sound', 'sound/players', 'sound/editors', 'sound/mixers',
-            # Networking / Internet
-            'networking/www', 'networking/mail', 'networking/chat',
-            'networking/instant messaging', 'networking/news', 'networking/ftp',
-            'networking/file transfer', 'networking/remote access',
-            # Education & Science
-            'education', 'sciences', 'sciences/astronomy', 'sciences/chemistry',
-            'sciences/mathematics', 'sciences/physics',
-            # Development (IDEs only)
-            'development/ide',
-            # Accessibility
-            'accessibility',
-            # Archiving
-            'archiving/compression',
-            # Editors
-            'editors',
-            # Emulators
-            'emulators',
-            # File tools
-            'file tools',
-            # Terminals
-            'terminals',
-        }
-
-        # Map RPM groups to freedesktop categories
-        GROUP_TO_CATEGORY = {
-            'games': 'Game', 'games/arcade': 'Game', 'games/boards': 'Game',
-            'games/cards': 'Game', 'games/puzzles': 'Game', 'games/sports': 'Game',
-            'games/strategy': 'Game', 'games/adventure': 'Game', 'games/rpg': 'Game',
-            'office': 'Office', 'office/suite': 'Office', 'office/wordprocessor': 'Office',
-            'office/spreadsheet': 'Office', 'office/presentation': 'Office',
-            'office/database': 'Office', 'office/finance': 'Office',
-            'graphics': 'Graphics', 'graphics/viewer': 'Graphics', 'graphics/editor': 'Graphics',
-            'graphics/3d': 'Graphics', 'graphics/photography': 'Graphics', 'graphics/scanning': 'Graphics',
-            'video': 'AudioVideo', 'video/players': 'AudioVideo', 'video/editors': 'AudioVideo',
-            'sound': 'AudioVideo', 'sound/players': 'AudioVideo', 'sound/editors': 'AudioVideo',
-            'sound/mixers': 'AudioVideo',
-            'networking/www': 'Network', 'networking/mail': 'Network', 'networking/chat': 'Network',
-            'networking/instant messaging': 'Network', 'networking/news': 'Network',
-            'networking/ftp': 'Network', 'networking/file transfer': 'Network',
-            'networking/remote access': 'Network',
-            'education': 'Education', 'sciences': 'Science', 'sciences/astronomy': 'Science',
-            'sciences/chemistry': 'Science', 'sciences/mathematics': 'Science',
-            'sciences/physics': 'Science',
-            'development/ide': 'Development',
-            'accessibility': 'Accessibility',
-            'archiving/compression': 'Utility',
-            'editors': 'TextEditor',
-            'emulators': 'Game',
-            'file tools': 'Utility',
-            'terminals': 'TerminalEmulator',
-            'graphical desktop/gnome': 'GNOME', 'graphical desktop/kde': 'KDE',
-            'graphical desktop/xfce': 'XFCE', 'graphical desktop/other': 'Utility',
-        }
-
-        # Create root element
-        root = ET.Element('components')
-        root.set('version', '0.14')
-        root.set('origin', f'mageia-{version}')
-
-        conn = db._get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute('''
-            SELECT DISTINCT
-                p.name, p.version, p.release, p.arch,
-                p.summary, p.description, p.url, p.license,
-                p.size, p.group_name
-            FROM packages p
-            JOIN media m ON p.media_id = m.id
-            WHERE m.enabled = 1
-            ORDER BY p.name
-        ''')
-
-        pkg_count = 0
-        skipped = 0
-        for row in cursor.fetchall():
-            name, ver, release, arch, summary, description, url, license_, size, group_name = row
-
-            # Skip non-application packages
-            if name.endswith(('-debug', '-debuginfo', '-devel', '-static', '-doc', '-docs')):
-                skipped += 1
-                continue
-            if name.startswith(('lib', 'perl-', 'python-', 'python3-', 'ruby-', 'golang-', 'rust-')):
-                skipped += 1
-                continue
-            if name.endswith(('-libs', '-common', '-data', '-lang', '-l10n', '-i18n')):
-                skipped += 1
-                continue
-
-            # Filter by group - only desktop applications
-            group_lower = (group_name or '').lower()
-            if not any(group_lower.startswith(g) or group_lower == g for g in DESKTOP_GROUPS):
-                skipped += 1
-                continue
-
-            # Create component as desktop-application
-            component = ET.SubElement(root, 'component')
-            component.set('type', 'desktop-application')
-
-            # Desktop ID (AppStream spec requires .desktop suffix)
-            desktop_id = f'{name}.desktop'
-            ET.SubElement(component, 'id').text = desktop_id
-            ET.SubElement(component, 'pkgname').text = name
-            ET.SubElement(component, 'name').text = name
-            ET.SubElement(component, 'summary').text = summary or f'{name} application'
-
-            # Launchable (desktop file reference)
-            launchable = ET.SubElement(component, 'launchable')
-            launchable.set('type', 'desktop-id')
-            launchable.text = desktop_id
-
-            if description:
-                desc_elem = ET.SubElement(component, 'description')
-                p_elem = ET.SubElement(desc_elem, 'p')
-                p_elem.text = description[:500]
-
-            if url:
-                url_elem = ET.SubElement(component, 'url')
-                url_elem.set('type', 'homepage')
-                url_elem.text = url
-
-            if license_:
-                ET.SubElement(component, 'project_license').text = license_
-
-            # Category from group mapping
-            categories = ET.SubElement(component, 'categories')
-            category = GROUP_TO_CATEGORY.get(group_lower, 'Utility')
-            ET.SubElement(categories, 'category').text = category
-
-            # Icon - try package name, fallback to stock
-            icon = ET.SubElement(component, 'icon')
-            icon.set('type', 'stock')
-            icon.text = name  # Many apps have icon named after package
-
-            pkg_count += 1
-
-        print(f"Generated {pkg_count} desktop application components")
-        print(f"Skipped {skipped} non-application packages")
-
-        # Write output
-        tree = ET.ElementTree(root)
-
-        # Add XML declaration
-        xml_str = ET.tostring(root, encoding='unicode')
-        xml_str = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
-
-        if no_compress or not str(output_path).endswith('.gz'):
+            output_path = appstream_mgr.get_media_appstream_path(media_name)
+            appstream_mgr._ensure_dirs()
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(xml_str)
-        else:
-            with gzip.open(output_path, 'wt', encoding='utf-8') as f:
-                f.write(xml_str)
 
-        print(colors.ok(f"AppStream catalog generated: {output_path}"))
-        print("\nTo refresh the AppStream cache, run:")
-        print("  sudo appstreamcli refresh-cache --force")
+            print(colors.ok(f"Generated {count} components -> {output_path}"))
+            return 0
+
+        else:
+            # Generate for all enabled media and merge
+            print("Generating AppStream for all enabled media...")
+
+            media_list = db.list_media()
+            enabled_media = [m for m in media_list if m['enabled']]
+
+            total = 0
+            for media in enabled_media:
+                xml_str, count = appstream_mgr.generate_for_media(
+                    media['id'], media['name']
+                )
+
+                output_path = appstream_mgr.get_media_appstream_path(media['name'])
+                appstream_mgr._ensure_dirs()
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(xml_str)
+
+                print(f"  {media['name']}: {count} components")
+                total += count
+
+            # Merge all catalogs
+            print("\nMerging catalogs...")
+            total_merged, media_count = appstream_mgr.merge_all_catalogs()
+            print(colors.ok(f"Merged {total_merged} components from {media_count} media"))
+            print(f"Output: {appstream_mgr.catalog_path}")
+
+            print("\nTo refresh the AppStream cache, run:")
+            print("  sudo appstreamcli refresh-cache --force")
+            return 0
+
+    elif args.appstream_command == 'status':
+        # Show AppStream status for all media
+        status_list = appstream_mgr.get_status()
+
+        if not status_list:
+            print("No media configured")
+            return 0
+
+        # Header
+        print(f"{'Media':<30} {'Source':<12} {'Components':>10} {'Last Updated':<20}")
+        print("-" * 75)
+
+        for item in status_list:
+            name = item['media_name'][:29]
+            source = item['source']
+            count = item['component_count']
+            mtime = item['last_updated']
+
+            if mtime > 0:
+                updated = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
+            else:
+                updated = '-'
+
+            # Color source
+            if source == 'upstream':
+                source_str = colors.ok(source)
+            elif source == 'generated':
+                source_str = colors.warning(source)
+            elif source == 'missing':
+                source_str = colors.error(source)
+            else:
+                source_str = source
+
+            print(f"{name:<30} {source_str:<21} {count:>10} {updated:<20}")
+
+        # Summary
+        print("-" * 75)
+        total = sum(s['component_count'] for s in status_list)
+        upstream = sum(1 for s in status_list if s['source'] == 'upstream')
+        generated = sum(1 for s in status_list if s['source'] == 'generated')
+        missing = sum(1 for s in status_list if s['source'] == 'missing')
+
+        print(f"Total: {total} components | upstream: {upstream}, generated: {generated}, missing: {missing}")
+
+        # Check merged catalog
+        if appstream_mgr.catalog_path.exists():
+            mtime = appstream_mgr.catalog_path.stat().st_mtime
+            updated = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
+            print(f"\nMerged catalog: {appstream_mgr.catalog_path} (updated: {updated})")
+        else:
+            print(f"\nMerged catalog: {colors.warning('not found')} (run 'urpm appstream merge')")
+
+        return 0
+
+    elif args.appstream_command == 'merge':
+        # Merge per-media files into unified catalog
+        print("Merging AppStream catalogs...")
+
+        total, media_count = appstream_mgr.merge_all_catalogs(
+            progress_callback=lambda msg: print(f"  {msg}")
+        )
+
+        if total == 0:
+            print(colors.warning("No components found. Run 'urpm media update' first."))
+            return 1
+
+        print(colors.ok(f"Merged {total} components from {media_count} media"))
+        print(f"Output: {appstream_mgr.catalog_path}")
+
+        # Refresh system cache if requested
+        if getattr(args, 'refresh', False):
+            print("\nRefreshing system AppStream cache...")
+            if appstream_mgr.refresh_system_cache():
+                print(colors.ok("Cache refreshed"))
+            else:
+                print(colors.warning("Cache refresh failed (appstreamcli may not be installed)"))
 
         return 0
 
