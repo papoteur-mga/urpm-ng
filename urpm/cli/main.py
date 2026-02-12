@@ -1920,6 +1920,10 @@ def _extract_pkg_name(package: str) -> str:
         The package name
     """
     import re
+    # Don't try to extract NEVRA from virtual packages (pkgconfig, etc.)
+    # These have parentheses and the version inside is part of the name
+    if '(' in package:
+        return package
     # If it looks like a NEVRA (has version pattern), extract name
     # Pattern: name-version-release.arch where version starts with digit
     match = re.match(r'^(.+?)-\d+[.:]', package)

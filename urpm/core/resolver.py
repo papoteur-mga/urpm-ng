@@ -1184,20 +1184,36 @@ class Resolver:
                     favored.add(pkg_name)
 
         for name in package_names:
+            # Parse version constraint if present (formats: "name >= ver" or "name[>= ver]")
+            base_name = name
+            version_constraint = None
+
+            # Handle "name op version" format (space-separated)
+            space_match = re.match(r'^(.+?)\s+(>=|<=|>|<|==|=)\s+(.+)$', name)
+            if space_match:
+                base_name = space_match.group(1)
+                version_constraint = (space_match.group(2), space_match.group(3))
+            else:
+                # Handle "name[op version]" format (bracket)
+                bracket_match = re.match(r'^([^\[]+)\[([<>=!]+)\s*(.+)\]$', name)
+                if bracket_match:
+                    base_name = bracket_match.group(1)
+                    version_constraint = (bracket_match.group(2), bracket_match.group(3))
+
             # Use multiple selection flags for flexibility
             flags = (solv.Selection.SELECTION_NAME |
                     solv.Selection.SELECTION_CANON |
                     solv.Selection.SELECTION_DOTARCH |
                     solv.Selection.SELECTION_REL)
-            sel = self.pool.select(name, flags)
+            sel = self.pool.select(base_name, flags)
 
             if sel.isempty():
                 # Try glob match
-                sel = self.pool.select(name, solv.Selection.SELECTION_GLOB |
+                sel = self.pool.select(base_name, solv.Selection.SELECTION_GLOB |
                                        solv.Selection.SELECTION_CANON)
             if sel.isempty():
                 # Try provides match
-                sel = self.pool.select(name, solv.Selection.SELECTION_PROVIDES)
+                sel = self.pool.select(base_name, solv.Selection.SELECTION_PROVIDES)
 
                 if not sel.isempty() and name not in choices:
                     # Check if multiple different packages provide this capability
@@ -1223,15 +1239,15 @@ class Resolver:
                             )]
                         )
 
-            if sel.isempty() and name not in local_packages:
+            if sel.isempty() and base_name not in local_packages:
                 not_found.append(name)
-            elif name in local_packages:
+            elif base_name in local_packages:
                 # For local packages, find directly in @LocalRPMs repo (pool.select doesn't work)
                 local_solvable = None
                 for repo in self.pool.repos:
                     if repo.name == '@LocalRPMs':
                         for s in repo.solvables:
-                            if s.name == name:
+                            if s.name == base_name:
                                 local_solvable = s
                                 break
                         break
