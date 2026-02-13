@@ -925,6 +925,37 @@ queue._child_process_standalone()
                 pass
 
         if problems:
+            # For upgrade operations, "already installed" errors are benign
+            # They occur when the package is already at the target version
+            # (e.g., user clicked Update twice, or race between resolve and install)
+            if op.operation_id == "upgrade":
+                real_problems = []
+                for p in problems:
+                    msg = str(p) if isinstance(p, str) else (p[0] if isinstance(p, tuple) else str(p))
+                    if "is already installed" not in msg:
+                        real_problems.append(p)
+                    else:
+                        # Log but don't treat as error
+                        print(f"[_execute_install] NOTE: {msg} (ignored for upgrade)", file=sys.stderr)
+                        sys.stderr.flush()
+                if not real_problems:
+                    # All problems were benign "already installed"
+                    _log_background(f"Upgrade completed: {total} packages (some already at target version)")
+                    if release_parent_after and not pipe_state['closed']:
+                        pipe_state['file'].write(QueueProgressMessage(
+                            msg_type='op_done',
+                            operation_id=op.operation_id,
+                            count=total
+                        ).to_json() + "\n")
+                        pipe_state['file'].write(QueueProgressMessage(
+                            msg_type='parent_can_exit'
+                        ).to_json() + "\n")
+                        pipe_state['file'].flush()
+                        pipe_state['file'].close()
+                        pipe_state['closed'] = True
+                    return True, total, []
+                problems = real_problems
+
             print(f"[_execute_install] PROBLEMS: {problems}", file=sys.stderr)
             sys.stderr.flush()
             _log_background(f"Transaction failed: {problems}")

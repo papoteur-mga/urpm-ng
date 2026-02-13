@@ -50,9 +50,9 @@ Il manque quoi ?
 
 ---
 
-## Status (2026-02-12)
+## Status (2026-02-13)
 
-- **Point 0** : À traiter - logs "already installed" incohérents lors des mises à jour
+- **Point 0** : RÉSOLU - filtrage des erreurs "already installed" bénignes lors des upgrades
 - **Point 1** : RÉSOLU - `data/mageia.metainfo.xml` créé
 - **Point 2** : RÉSOLU - `pk_backend_get_update_detail` implémenté
 - **Point 3** : Dépend du point 1, devrait être OK maintenant
